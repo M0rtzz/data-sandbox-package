@@ -1,0 +1,645 @@
+#!/usr/bin/env bash
+# Copyright 2026 Ant Group Co., Ltd.
+# Licensed under the Apache License, Version 2.0.
+
+# Build and run a fully isolated developer stack from the current checkout.
+# This script never reads data-sandbox.env and never touches a shared deployment.
+set -Eeuo pipefail
+
+PACKAGE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKSPACE_DIR="$(cd "${PACKAGE_DIR}/.." && pwd)"
+BACKEND_DIR="$(realpath -m "${WORKSPACE_DIR}/secretpad")"
+FRONTEND_DIR="$(realpath -m "${WORKSPACE_DIR}/secretpad-frontend")"
+
+# shellcheck source=deploy/common/log.sh
+source "${PACKAGE_DIR}/deploy/common/log.sh"
+# shellcheck source=deploy/common/utils.sh
+source "${PACKAGE_DIR}/deploy/common/utils.sh"
+
+case "${1:-help}" in
+  -h|--help) COMMAND=help ;;
+  *) COMMAND="${1:-help}" ;;
+esac
+if [ "$#" -gt 0 ]; then
+  shift
+fi
+
+DEV_NAME="${DATA_SANDBOX_DEV_NAME:-$(id -un)}"
+CONSOLE_PORT="${DATA_SANDBOX_DEV_PORT:-18088}"
+GATEWAY_PORT="${DATA_SANDBOX_DEV_GATEWAY_PORT:-18080}"
+API_HTTP_PORT="${DATA_SANDBOX_DEV_API_HTTP_PORT:-18082}"
+API_GRPC_PORT="${DATA_SANDBOX_DEV_API_GRPC_PORT:-18083}"
+INTERNAL_PORT="${DATA_SANDBOX_DEV_INTERNAL_PORT:-13081}"
+METRICS_PORT="${DATA_SANDBOX_DEV_METRICS_PORT:-13084}"
+ADMIN_USER="${DATA_SANDBOX_DEV_ADMIN_USER:-devadmin}"
+EXPECTED_BRANCH="${DATA_SANDBOX_DEV_BRANCH:-}"
+SKIP_BUILD=false
+LOG_COMPONENT=secretpad
+KUSCIA_IMAGE="${DATA_SANDBOX_DEV_KUSCIA_IMAGE:-secretflow-registry.cn-hangzhou.cr.aliyuncs.com/secretflow/kuscia:0.13.0b0}"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./develop.sh up [options]
+  ./develop.sh status [options]
+  ./develop.sh logs [options]
+  ./develop.sh restart [options]
+  ./develop.sh down [options]
+
+Options:
+  --name NAME            Developer identifier. Default: current system user.
+  --port PORT            SecretPad console port. Default: 18088.
+  --gateway-port PORT    Kuscia gateway port. Default: 18080.
+  --api-http-port PORT   Kuscia HTTP API port. Default: 18082.
+  --api-grpc-port PORT   Kuscia gRPC API port. Default: 18083.
+  --internal-port PORT   Kuscia internal service port. Default: 13081.
+  --metrics-port PORT    Kuscia metrics port. Default: 13084.
+  --admin-user USER      SecretPad developer administrator. Default: devadmin.
+  --branch BRANCH        Required branch. Default: develop/<developer-name>.
+  --skip-build           Reuse the existing developer image.
+  --component NAME       Log component: secretpad or kuscia.
+  -h, --help             Show this help.
+
+Environment overrides:
+  DATA_SANDBOX_DEV_ROOT          Private runtime root. It must be below this checkout.
+  DATA_SANDBOX_DEV_KUSCIA_IMAGE  Kuscia image used by the private stack.
+
+The first `up` prompts for a private developer administrator password. Runtime
+data, credentials, certificates, containers, ports, and the Docker network are
+isolated from every shared Alice/Bob deployment.
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --name) DEV_NAME="${2:?Missing value for --name}"; shift 2 ;;
+    --port) CONSOLE_PORT="${2:?Missing value for --port}"; shift 2 ;;
+    --gateway-port) GATEWAY_PORT="${2:?Missing value for --gateway-port}"; shift 2 ;;
+    --api-http-port) API_HTTP_PORT="${2:?Missing value for --api-http-port}"; shift 2 ;;
+    --api-grpc-port) API_GRPC_PORT="${2:?Missing value for --api-grpc-port}"; shift 2 ;;
+    --internal-port) INTERNAL_PORT="${2:?Missing value for --internal-port}"; shift 2 ;;
+    --metrics-port) METRICS_PORT="${2:?Missing value for --metrics-port}"; shift 2 ;;
+    --admin-user) ADMIN_USER="${2:?Missing value for --admin-user}"; shift 2 ;;
+    --branch) EXPECTED_BRANCH="${2:?Missing value for --branch}"; shift 2 ;;
+    --skip-build) SKIP_BUILD=true; shift ;;
+    --component) LOG_COMPONENT="${2:?Missing value for --component}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) log_error "Unknown option: $1"; usage; exit 1 ;;
+  esac
+done
+
+if [ "$COMMAND" = "help" ]; then
+  usage
+  exit 0
+fi
+
+case "$COMMAND" in
+  up|status|logs|restart|down) ;;
+  *) log_error "Unknown command: ${COMMAND}"; usage; exit 1 ;;
+esac
+
+[[ "$DEV_NAME" =~ ^[a-z0-9][a-z0-9-]{0,30}$ ]] || {
+  log_error "Developer name must contain lowercase letters, digits, or hyphens."
+  exit 1
+}
+[[ "$ADMIN_USER" =~ ^[a-zA-Z0-9_-]{4,64}$ ]] || {
+  log_error "Administrator name must contain 4 to 64 safe characters."
+  exit 1
+}
+
+for port in "$CONSOLE_PORT" "$GATEWAY_PORT" "$API_HTTP_PORT" "$API_GRPC_PORT" "$INTERNAL_PORT" "$METRICS_PORT"; do
+  if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1024 ] || [ "$port" -gt 65535 ]; then
+    log_error "Invalid unprivileged TCP port: ${port}"
+    exit 1
+  fi
+done
+
+if [ -z "$EXPECTED_BRANCH" ]; then
+  EXPECTED_BRANCH="develop/${DEV_NAME}"
+fi
+
+DEV_ROOT="${DATA_SANDBOX_DEV_ROOT:-${WORKSPACE_DIR}/.dev-runtime/${DEV_NAME}}"
+DEV_ROOT="$(realpath -m "$DEV_ROOT")"
+DEV_PREFIX="data-sandbox-dev-${DEV_NAME}"
+KUSCIA_CONTAINER="${DEV_PREFIX}-kuscia"
+SECRETPAD_CONTAINER="${DEV_PREFIX}-secretpad"
+DEV_NETWORK="${DEV_PREFIX}"
+SECRETPAD_IMAGE="data-sandbox-secretpad:dev-${DEV_NAME}"
+DOMAIN_ID="dev-${DEV_NAME}"
+
+KUSCIA_ROOT="${DEV_ROOT}/kuscia"
+KUSCIA_CONFIG_DIR="${KUSCIA_ROOT}/config"
+KUSCIA_DATA_DIR="${KUSCIA_ROOT}/data"
+KUSCIA_LOG_DIR="${KUSCIA_ROOT}/log"
+KUSCIA_IMAGE_DIR="${KUSCIA_ROOT}/images"
+KUSCIA_K3S_DIR="${KUSCIA_ROOT}/k3s"
+KUSCIA_CONTAINERD_DIR="${KUSCIA_ROOT}/containerd"
+SECRETPAD_ROOT="${DEV_ROOT}/secretpad"
+SECRETPAD_CONFIG_DIR="${SECRETPAD_ROOT}/config"
+SECRETPAD_DB_DIR="${SECRETPAD_ROOT}/db"
+SECRETPAD_DATA_DIR="${SECRETPAD_ROOT}/data"
+SECRETPAD_LOG_DIR="${SECRETPAD_ROOT}/log"
+SNAPSHOT_DIR="${DEV_ROOT}/snapshots"
+BACKUP_DIR="${DEV_ROOT}/backups"
+CREDENTIAL_FILE="${DEV_ROOT}/secretpad.env"
+MANIFEST_FILE="${DEV_ROOT}/build-manifest.txt"
+
+owner_label="io.hustnlp.data-sandbox.dev-owner"
+workspace_label="io.hustnlp.data-sandbox.dev-workspace"
+managed_label="io.hustnlp.data-sandbox.dev"
+
+reject_foreign_paths() {
+  local path
+  for path in "$PACKAGE_DIR" "$WORKSPACE_DIR" "$BACKEND_DIR" "$FRONTEND_DIR" "$DEV_ROOT"; do
+    case "$path" in
+      /data/xzh|/data/xzh/*|/home/xzh|/home/xzh/*|/nas/Users/xzh|/nas/Users/xzh/*)
+        log_error "Developer isolation rejected a path owned by xzh: ${path}"
+        exit 1
+        ;;
+    esac
+  done
+  case "$DEV_ROOT" in
+    "${WORKSPACE_DIR}"/.dev-runtime/*) ;;
+    *)
+      log_error "DATA_SANDBOX_DEV_ROOT must stay below ${WORKSPACE_DIR}/.dev-runtime/."
+      exit 1
+      ;;
+  esac
+}
+
+require_personal_checkout() {
+  local current_uid path path_uid
+  current_uid="$(id -u)"
+  [ "$current_uid" -ne 0 ] || {
+    log_error "Do not run develop.sh with sudo or as root."
+    exit 1
+  }
+  reject_foreign_paths
+  for path in "$PACKAGE_DIR" "$BACKEND_DIR" "$FRONTEND_DIR"; do
+    [ -d "$path" ] || { log_error "Required checkout is missing: ${path}"; exit 1; }
+    path_uid="$(stat -c '%u' "$path")"
+    [ "$path_uid" = "$current_uid" ] || {
+      log_error "Checkout is not owned by the current user: ${path}"
+      exit 1
+    }
+  done
+}
+
+verify_pushed_checkout() {
+  local repository=$1
+  local branch upstream counts
+  git -C "$repository" rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
+    log_error "Not a Git repository: ${repository}"
+    exit 1
+  }
+  [ -z "$(git -C "$repository" status --porcelain)" ] || {
+    log_error "Uncommitted or untracked files exist in ${repository}. Commit and push them first."
+    exit 1
+  }
+  branch="$(git -C "$repository" branch --show-current)"
+  [ "$branch" = "$EXPECTED_BRANCH" ] || {
+    log_error "${repository} is on ${branch:-detached HEAD}; expected ${EXPECTED_BRANCH}."
+    exit 1
+  }
+  upstream="$(git -C "$repository" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)" || {
+    log_error "${repository} has no upstream branch. Push ${EXPECTED_BRANCH} first."
+    exit 1
+  }
+  git -C "$repository" fetch --quiet || {
+    log_error "Cannot refresh the remote state for ${repository}. Check Git access."
+    exit 1
+  }
+  counts="$(git -C "$repository" rev-list --left-right --count "${upstream}...HEAD")"
+  [ "$counts" = $'0\t0' ] || {
+    log_error "${repository} differs from ${upstream} (${counts}). Pull or push before building."
+    exit 1
+  }
+}
+
+verify_managed_container() {
+  local container=$1
+  local actual_owner actual_workspace managed
+  if ! docker inspect "$container" >/dev/null 2>&1; then
+    return 1
+  fi
+  managed="$(docker inspect --format "{{index .Config.Labels \"${managed_label}\"}}" "$container")"
+  actual_owner="$(docker inspect --format "{{index .Config.Labels \"${owner_label}\"}}" "$container")"
+  actual_workspace="$(docker inspect --format "{{index .Config.Labels \"${workspace_label}\"}}" "$container")"
+  if [ "$managed" != "true" ] || [ "$actual_owner" != "$(id -un)" ] || [ "$actual_workspace" != "$WORKSPACE_DIR" ]; then
+    log_error "Refusing to operate an unowned container: ${container}"
+    exit 1
+  fi
+  return 0
+}
+
+verify_managed_image() {
+  local image=$1
+  local actual_owner actual_workspace managed
+  docker image inspect "$image" >/dev/null 2>&1 || return 1
+  managed="$(docker image inspect --format "{{index .Config.Labels \"${managed_label}\"}}" "$image")"
+  actual_owner="$(docker image inspect --format "{{index .Config.Labels \"${owner_label}\"}}" "$image")"
+  actual_workspace="$(docker image inspect --format "{{index .Config.Labels \"${workspace_label}\"}}" "$image")"
+  if [ "$managed" != "true" ] || [ "$actual_owner" != "$(id -un)" ] || [ "$actual_workspace" != "$WORKSPACE_DIR" ]; then
+    log_error "Refusing to use an image not built by this developer checkout: ${image}"
+    exit 1
+  fi
+  return 0
+}
+
+ensure_network() {
+  if docker network inspect "$DEV_NETWORK" >/dev/null 2>&1; then
+    local actual_owner actual_workspace
+    actual_owner="$(docker network inspect --format "{{index .Labels \"${owner_label}\"}}" "$DEV_NETWORK")"
+    actual_workspace="$(docker network inspect --format "{{index .Labels \"${workspace_label}\"}}" "$DEV_NETWORK")"
+    if [ "$actual_owner" != "$(id -un)" ] || [ "$actual_workspace" != "$WORKSPACE_DIR" ]; then
+      log_error "Refusing to use an unowned Docker network: ${DEV_NETWORK}"
+      exit 1
+    fi
+    return
+  fi
+  docker network create \
+    --label "${managed_label}=true" \
+    --label "${owner_label}=$(id -un)" \
+    --label "${workspace_label}=${WORKSPACE_DIR}" \
+    "$DEV_NETWORK" >/dev/null
+}
+
+require_port_available() {
+  local port=$1
+  local allowed_container=$2
+  local owners
+  owners="$(docker ps --filter "publish=${port}" --format '{{.Names}}')"
+  if [ -n "$owners" ] && [ "$owners" != "$allowed_container" ]; then
+    log_error "Port ${port} is already published by: ${owners}"
+    exit 1
+  fi
+}
+
+copy_image_tree() {
+  local image=$1
+  local source=$2
+  local destination=$3
+  local temporary="${DEV_PREFIX}-init-${RANDOM}-${RANDOM}"
+  docker create --name "$temporary" "$image" >/dev/null
+  trap 'docker rm -f "$temporary" >/dev/null 2>&1 || true' RETURN
+  docker cp "${temporary}:${source}" "$destination"
+  docker rm -f "$temporary" >/dev/null
+  trap - RETURN
+}
+
+sqlite_exec() {
+  local sql=$1
+  docker run --rm --entrypoint sqlite3 \
+    -v "${SECRETPAD_DB_DIR}:/db" \
+    "$SECRETPAD_IMAGE" /db/secretpad.sqlite "$sql"
+}
+
+wait_for_kuscia_dev() {
+  local attempt=0
+  while [ "$attempt" -lt 240 ]; do
+    if docker exec "$KUSCIA_CONTAINER" sh -lc \
+      'test -f /home/kuscia/var/certs/domain.crt && curl -ksS --max-time 2 https://127.0.0.1:1080/healthZ >/dev/null' \
+      >/dev/null 2>&1; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  return 1
+}
+
+ensure_runtime_directories() {
+  local fs_type
+  mkdir -p "$DEV_ROOT"
+  [ "$(stat -c '%u' "$DEV_ROOT")" = "$(id -u)" ] || {
+    log_error "Runtime root is not owned by the current user: ${DEV_ROOT}"
+    exit 1
+  }
+  fs_type="$(stat -f -c '%T' "$DEV_ROOT")"
+  case "$fs_type" in
+    ext2/ext3|xfs|btrfs) ;;
+    *)
+      log_error "Private Kuscia runtime requires ext4/xfs/btrfs, found ${fs_type} at ${DEV_ROOT}."
+      exit 1
+      ;;
+  esac
+  mkdir -p "$KUSCIA_CONFIG_DIR" "$KUSCIA_DATA_DIR" "$KUSCIA_LOG_DIR"
+  mkdir -p "$KUSCIA_IMAGE_DIR" "$KUSCIA_K3S_DIR" "$KUSCIA_CONTAINERD_DIR"
+  mkdir -p "$SECRETPAD_ROOT" "$SECRETPAD_DB_DIR" "$SECRETPAD_DATA_DIR" "$SECRETPAD_LOG_DIR"
+  mkdir -p "$SNAPSHOT_DIR" "$BACKUP_DIR"
+  chmod 700 "$DEV_ROOT"
+}
+
+build_developer_image() {
+  local generated_template="secretpad-web/src/main/resources/templates/index.html"
+  verify_pushed_checkout "$BACKEND_DIR"
+  verify_pushed_checkout "$FRONTEND_DIR"
+  if [ "$SKIP_BUILD" = true ]; then
+    verify_managed_image "$SECRETPAD_IMAGE" || {
+      log_error "Developer image not found: ${SECRETPAD_IMAGE}. Run up without --skip-build."
+      exit 1
+    }
+    return
+  fi
+  log "Building developer image ${SECRETPAD_IMAGE} from pushed commits"
+  if ! DATA_SANDBOX_DEV_IMAGE=true \
+      DATA_SANDBOX_DEV_IMAGE_OWNER="$(id -un)" \
+      DATA_SANDBOX_DEV_IMAGE_WORKSPACE="$WORKSPACE_DIR" \
+      SECRETPAD_IMAGE="$SECRETPAD_IMAGE" \
+      "${PACKAGE_DIR}/build.sh"; then
+    git -C "$BACKEND_DIR" restore --worktree -- "$generated_template"
+    log_error "Developer image build failed."
+    exit 1
+  fi
+  git -C "$BACKEND_DIR" restore --worktree -- "$generated_template"
+  [ -z "$(git -C "$BACKEND_DIR" status --porcelain)" ] || {
+    log_error "The build left unexpected changes in ${BACKEND_DIR}."
+    exit 1
+  }
+  [ -z "$(git -C "$FRONTEND_DIR" status --porcelain)" ] || {
+    log_error "The build left unexpected changes in ${FRONTEND_DIR}."
+    exit 1
+  }
+  verify_managed_image "$SECRETPAD_IMAGE"
+}
+
+start_kuscia() {
+  docker image inspect "$KUSCIA_IMAGE" >/dev/null 2>&1 || {
+    log_error "Kuscia image is missing: ${KUSCIA_IMAGE}"
+    exit 1
+  }
+  if [ ! -s "${KUSCIA_CONFIG_DIR}/kuscia.yaml" ]; then
+    log "Generating private Kuscia configuration for ${DOMAIN_ID}"
+    docker run --rm "$KUSCIA_IMAGE" kuscia init \
+      --mode autonomy --domain "$DOMAIN_ID" --protocol mtls --runtime runc \
+      >"${KUSCIA_CONFIG_DIR}/kuscia.yaml"
+    chmod 600 "${KUSCIA_CONFIG_DIR}/kuscia.yaml"
+  fi
+
+  if verify_managed_container "$KUSCIA_CONTAINER"; then
+    docker start "$KUSCIA_CONTAINER" >/dev/null
+  else
+    require_port_available "$INTERNAL_PORT" "$KUSCIA_CONTAINER"
+    require_port_available "$GATEWAY_PORT" "$KUSCIA_CONTAINER"
+    require_port_available "$API_HTTP_PORT" "$KUSCIA_CONTAINER"
+    require_port_available "$API_GRPC_PORT" "$KUSCIA_CONTAINER"
+    require_port_available "$METRICS_PORT" "$KUSCIA_CONTAINER"
+    log "Starting private Kuscia container ${KUSCIA_CONTAINER}"
+    docker run -d --init --privileged --restart unless-stopped \
+      --name "$KUSCIA_CONTAINER" --hostname "$KUSCIA_CONTAINER" \
+      --network "$DEV_NETWORK" \
+      --label "${managed_label}=true" \
+      --label "${owner_label}=$(id -un)" \
+      --label "${workspace_label}=${WORKSPACE_DIR}" \
+      -p "${INTERNAL_PORT}:80" -p "${GATEWAY_PORT}:1080" \
+      -p "${API_HTTP_PORT}:8082" -p "${API_GRPC_PORT}:8083" \
+      -p "${METRICS_PORT}:9091" \
+      -v "${KUSCIA_CONFIG_DIR}/kuscia.yaml:/home/kuscia/etc/conf/kuscia.yaml" \
+      -v "${KUSCIA_DATA_DIR}:/home/kuscia/var/storage/data" \
+      -v "${KUSCIA_LOG_DIR}:/home/kuscia/var/stdout" \
+      -v "${KUSCIA_IMAGE_DIR}:/home/kuscia/var/images" \
+      -v "${KUSCIA_K3S_DIR}:/home/kuscia/var/k3s/server/db" \
+      -v "${KUSCIA_CONTAINERD_DIR}:/home/kuscia/containerd" \
+      "$KUSCIA_IMAGE" bin/kuscia start -c etc/conf/kuscia.yaml >/dev/null
+  fi
+
+  if ! wait_for_kuscia_dev; then
+    log_error "Private Kuscia did not become healthy: docker logs ${KUSCIA_CONTAINER}"
+    exit 1
+  fi
+
+  if ! docker exec "$KUSCIA_CONTAINER" test -f /home/kuscia/var/certs/kusciaapi-client.crt >/dev/null 2>&1; then
+    log "Generating a private Kuscia API client certificate"
+    docker exec "$KUSCIA_CONTAINER" sh -lc '
+      set -eu
+      cd /home/kuscia/var/certs
+      openssl genpkey -out kusciaapi-client.key -algorithm RSA -pkeyopt rsa_keygen_bits:2048
+      openssl req -new -key kusciaapi-client.key -out kusciaapi-client.csr -subj "/CN=KusciaAPIClient"
+      openssl x509 -req -in kusciaapi-client.csr -CA ca.crt -CAkey ca.key -days 1000 \
+        -sha256 -CAcreateserial -out kusciaapi-client.crt
+    '
+  fi
+}
+
+ensure_credentials() {
+  if [ -f "$CREDENTIAL_FILE" ]; then
+    chmod 600 "$CREDENTIAL_FILE"
+    ADMIN_USER="$(credential_value SECRETPAD_USER_NAME)"
+    return
+  fi
+  local password password_confirm
+  read -r -s -p "Developer administrator password: " password
+  printf '\n'
+  read -r -s -p "Confirm developer administrator password: " password_confirm
+  printf '\n'
+  [ "$password" = "$password_confirm" ] || {
+    log_error "Passwords do not match."
+    exit 1
+  }
+  [ "${#password}" -ge 8 ] || {
+    log_error "Developer administrator password must contain at least 8 characters."
+    exit 1
+  }
+  if [[ "$password" == *$'\n'* ]] || [[ "$password" == *$'\r'* ]]; then
+    log_error "Developer administrator password cannot contain a line break."
+    exit 1
+  fi
+  umask 077
+  {
+    printf 'SPRING_PROFILES_ACTIVE=p2p\n'
+    printf 'NODE_ID=%s\n' "$DOMAIN_ID"
+    printf 'DEPLOY_MODE=MPC\n'
+    printf 'INST_NAME=DataSandbox-%s\n' "$DEV_NAME"
+    printf 'KUSCIA_PROTOCOL=mtls\n'
+    printf 'KUSCIA_API_ADDRESS=%s:8083\n' "$KUSCIA_CONTAINER"
+    printf 'KUSCIA_GW_ADDRESS=%s:80\n' "$KUSCIA_CONTAINER"
+    printf 'SECRETPAD_USER_NAME=%s\n' "$ADMIN_USER"
+    printf 'SECRETPAD_PASSWORD=%s\n' "$password"
+    printf 'SECRETPAD_DATA_SANDBOX_KUSCIA_ENABLED=true\n'
+    printf 'SECRETPAD_DATA_SANDBOX_SNAPSHOT_ROOT=/app/dev-data/snapshots\n'
+    printf 'SECRETPAD_DATA_SANDBOX_BACKUP_ROOT=/app/dev-data/backups\n'
+    printf 'SECRETPAD_DATA_SANDBOX_STATUS_SYNC_MS=30000\n'
+    printf 'SPRINGDOC_API_DOCS_ENABLED=true\n'
+    printf 'SPRINGDOC_SWAGGER_UI_ENABLED=true\n'
+    printf 'SPRING_WEB_RESOURCES_CACHE_CACHECONTROL_NO_STORE=true\n'
+    printf 'JAVA_OPTS=-server -Xms512m -Xmx1536m\n'
+  } >"$CREDENTIAL_FILE"
+  chmod 600 "$CREDENTIAL_FILE"
+}
+
+credential_value() {
+  local key=$1
+  sed -n "s/^${key}=//p" "$CREDENTIAL_FILE" | head -n 1
+}
+
+initialize_secretpad_data() {
+  if [ ! -f "${SECRETPAD_CONFIG_DIR}/application.yaml" ]; then
+    log "Copying private SecretPad configuration"
+    copy_image_tree "$SECRETPAD_IMAGE" /app/config "$SECRETPAD_ROOT"
+  fi
+  mkdir -p "${SECRETPAD_CONFIG_DIR}/certs"
+
+  if [ ! -f "${SECRETPAD_DB_DIR}/secretpad.sqlite" ]; then
+    log "Initializing private SecretPad database"
+    docker run --rm --entrypoint /bin/sh \
+      -v "${SECRETPAD_DB_DIR}:/app/db" \
+      -v "${SECRETPAD_CONFIG_DIR}:/app/config" \
+      "$SECRETPAD_IMAGE" -lc '
+        set -eu
+        sqlite3 /app/db/secretpad.sqlite ".read /app/config/schema/p2p/V1__init.sql"
+        sqlite3 /app/db/secretpad.sqlite "select 1 from user_accounts limit 1;" >/dev/null
+      '
+    local password_hash
+    password_hash="$(printf '%s' "$(credential_value SECRETPAD_PASSWORD)" | sha256sum | awk '{print $1}')"
+    sqlite_exec "delete from user_accounts;
+      insert into user_accounts(name, password_hash, owner_type, owner_id, is_deleted)
+      values ('${ADMIN_USER}', '${password_hash}', 'P2P', '${DOMAIN_ID}', 0);"
+  fi
+
+  if [ ! -f "${SECRETPAD_CONFIG_DIR}/.dev-key-created" ]; then
+    docker run --rm --entrypoint /bin/sh \
+      -v "${SECRETPAD_CONFIG_DIR}:/tmp/config" \
+      "$SECRETPAD_IMAGE" -lc '
+        keytool -delete -alias secretpad-server -keystore /tmp/config/server.jks \
+          -keypass secretpad -storepass secretpad >/dev/null 2>&1 || true
+        keytool -genkey -keystore /tmp/config/server.jks -keyalg RSA -keysize 2048 \
+          -validity 3650 -keypass secretpad -storepass secretpad \
+          -dname "OU=Development,O=HUSTNLP,L=Wuhan,ST=Hubei,C=CN,CN=DataSandbox" \
+          -alias secretpad-server
+      ' </dev/null
+    touch "${SECRETPAD_CONFIG_DIR}/.dev-key-created"
+  fi
+
+  docker cp "${KUSCIA_CONTAINER}:/home/kuscia/var/certs/ca.crt" "${SECRETPAD_CONFIG_DIR}/certs/ca.crt"
+  docker cp "${KUSCIA_CONTAINER}:/home/kuscia/var/certs/token" "${SECRETPAD_CONFIG_DIR}/certs/token"
+  docker cp "${KUSCIA_CONTAINER}:/home/kuscia/var/certs/kusciaapi-client.crt" "${SECRETPAD_CONFIG_DIR}/certs/client.crt"
+  docker cp "${KUSCIA_CONTAINER}:/home/kuscia/var/certs/kusciaapi-client.key" "${SECRETPAD_CONFIG_DIR}/certs/client.pem"
+}
+
+start_secretpad() {
+  require_port_available "$CONSOLE_PORT" "$SECRETPAD_CONTAINER"
+  if verify_managed_container "$SECRETPAD_CONTAINER"; then
+    docker rm -f "$SECRETPAD_CONTAINER" >/dev/null
+  fi
+  log "Starting private SecretPad container ${SECRETPAD_CONTAINER}"
+  docker run -d --init --restart unless-stopped \
+    --name "$SECRETPAD_CONTAINER" --network "$DEV_NETWORK" \
+    --label "${managed_label}=true" \
+    --label "${owner_label}=$(id -un)" \
+    --label "${workspace_label}=${WORKSPACE_DIR}" \
+    -p "${CONSOLE_PORT}:8080" \
+    --env-file "$CREDENTIAL_FILE" \
+    -v "${SECRETPAD_CONFIG_DIR}:/app/config" \
+    -v "${SECRETPAD_DB_DIR}:/app/db" \
+    -v "${SECRETPAD_DATA_DIR}:/app/data" \
+    -v "${SECRETPAD_LOG_DIR}:/app/log" \
+    -v "${SNAPSHOT_DIR}:/app/dev-data/snapshots" \
+    -v "${BACKUP_DIR}:/app/dev-data/backups" \
+    "$SECRETPAD_IMAGE" >/dev/null
+
+  if ! wait_for_secretpad "$CONSOLE_PORT" 180; then
+    log_error "Private SecretPad did not become healthy: docker logs ${SECRETPAD_CONTAINER}"
+    exit 1
+  fi
+
+  if [ ! -f "${SECRETPAD_ROOT}/.node-address-configured" ]; then
+    docker stop "$SECRETPAD_CONTAINER" >/dev/null
+    sqlite_exec "update node set net_address='https://${KUSCIA_CONTAINER}:1080' where node_id='${DOMAIN_ID}';"
+    touch "${SECRETPAD_ROOT}/.node-address-configured"
+    docker start "$SECRETPAD_CONTAINER" >/dev/null
+    wait_for_secretpad "$CONSOLE_PORT" 180 || {
+      log_error "Private SecretPad failed after configuring its node address."
+      exit 1
+    }
+  fi
+}
+
+write_manifest() {
+  local backend_sha frontend_sha image_id
+  backend_sha="$(git -C "$BACKEND_DIR" rev-parse HEAD)"
+  frontend_sha="$(git -C "$FRONTEND_DIR" rev-parse HEAD)"
+  image_id="$(docker image inspect --format '{{.Id}}' "$SECRETPAD_IMAGE")"
+  umask 077
+  {
+    printf 'built_at=%s\n' "$(date --iso-8601=seconds)"
+    printf 'developer=%s\n' "$(id -un)"
+    printf 'workspace=%s\n' "$WORKSPACE_DIR"
+    printf 'secretpad_commit=%s\n' "$backend_sha"
+    printf 'secretpad_frontend_commit=%s\n' "$frontend_sha"
+    printf 'secretpad_image=%s\n' "$SECRETPAD_IMAGE"
+    printf 'secretpad_image_id=%s\n' "$image_id"
+    printf 'console_port=%s\n' "$CONSOLE_PORT"
+    printf 'kuscia_gateway_port=%s\n' "$GATEWAY_PORT"
+  } >"$MANIFEST_FILE"
+}
+
+show_status() {
+  printf 'Developer: %s\n' "$DEV_NAME"
+  printf 'Workspace: %s\n' "$WORKSPACE_DIR"
+  printf 'Runtime:   %s\n' "$DEV_ROOT"
+  printf 'Console:   http://127.0.0.1:%s/edge?tab=sandbox-manager\n' "$CONSOLE_PORT"
+  printf '\nContainers:\n'
+  for container in "$KUSCIA_CONTAINER" "$SECRETPAD_CONTAINER"; do
+    if verify_managed_container "$container"; then
+      docker inspect --format '  {{.Name}}: {{.State.Status}} ({{.Config.Image}})' "$container"
+    else
+      printf '  %s: not created\n' "$container"
+    fi
+  done
+  if [ -f "$MANIFEST_FILE" ]; then
+    printf '\nBuild manifest:\n'
+    sed 's/^/  /' "$MANIFEST_FILE"
+  fi
+}
+
+require_personal_checkout
+require_command docker
+require_command curl
+require_command realpath
+require_command git
+
+case "$COMMAND" in
+  up)
+    require_command sha256sum
+    ensure_runtime_directories
+    build_developer_image
+    ensure_network
+    start_kuscia
+    ensure_credentials
+    initialize_secretpad_data
+    start_secretpad
+    write_manifest
+    log_success "Private developer system is ready at http://127.0.0.1:${CONSOLE_PORT}/edge?tab=sandbox-manager"
+    log "Administrator: ${ADMIN_USER}"
+    ;;
+  status)
+    show_status
+    ;;
+  logs)
+    case "$LOG_COMPONENT" in
+      secretpad) target="$SECRETPAD_CONTAINER" ;;
+      kuscia) target="$KUSCIA_CONTAINER" ;;
+      *) log_error "Log component must be secretpad or kuscia."; exit 1 ;;
+    esac
+    verify_managed_container "$target" || { log_error "Container not found: ${target}"; exit 1; }
+    exec docker logs --tail 300 -f "$target"
+    ;;
+  restart)
+    verify_managed_container "$KUSCIA_CONTAINER" || { log_error "Private Kuscia is not created."; exit 1; }
+    verify_managed_container "$SECRETPAD_CONTAINER" || { log_error "Private SecretPad is not created."; exit 1; }
+    docker restart "$KUSCIA_CONTAINER" >/dev/null
+    wait_for_kuscia_dev || { log_error "Private Kuscia did not become healthy."; exit 1; }
+    docker restart "$SECRETPAD_CONTAINER" >/dev/null
+    wait_for_secretpad "$CONSOLE_PORT" 180 || { log_error "Private SecretPad did not become healthy."; exit 1; }
+    log_success "Private developer system restarted."
+    ;;
+  down)
+    if verify_managed_container "$SECRETPAD_CONTAINER"; then
+      docker stop "$SECRETPAD_CONTAINER" >/dev/null
+    fi
+    if verify_managed_container "$KUSCIA_CONTAINER"; then
+      docker stop "$KUSCIA_CONTAINER" >/dev/null
+    fi
+    log_success "Private developer system stopped. Runtime data was retained at ${DEV_ROOT}."
+    ;;
+esac
