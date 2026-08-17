@@ -89,14 +89,21 @@ sudo ./partner-node.sh resume bob
 `develop.sh` builds and runs a private Kuscia and SecretPad stack for a developer. It does not
 read `data-sandbox.env`, invoke `install.sh`, or reuse the shared Alice/Bob containers, ports,
 database, certificates, snapshots, or backups. Run it from a checkout owned by the developer;
-the script rejects root, foreign-owned source directories, `/data/xzh` paths, dirty worktrees,
-and commits that have not been pushed to the configured upstream branch.
+the script rejects root, foreign-owned source directories, dirty worktrees, and commits that
+have not been pushed to the configured upstream branch. The checkout may be located under
+`/data/xzh` when it is owned by xzh; isolation is enforced with private paths, ports, labels,
+containers, networks, databases, certificates, snapshots and backups.
 
 The default branch is `develop/<system-user>`. The first start prompts for a private administrator
-password and stores all runtime state below the developer's own checkout.
+password and stores all runtime state below the developer's own checkout. By default `up` builds
+the current working tree, so a developer can test changes before creating a commit. Add
+`--pushed-only` when checking that a release candidate is clean and synchronized with upstream.
+
+For the current shared development baseline, both `secretpad` and `secretpad-frontend` use
+`develop/xzh`. Run the isolated stack with an explicit developer name and branch:
 
 ```bash
-./develop.sh up
+./develop.sh up --name xzh --branch develop/xzh
 ./develop.sh status
 ./develop.sh logs --component secretpad
 ./develop.sh logs --component kuscia
@@ -104,13 +111,26 @@ password and stores all runtime state below the developer's own checkout.
 ./develop.sh down
 ```
 
+For the normal test-first workflow, edit code and start the private stack directly:
+
+```bash
+./develop.sh up --name xzh --branch develop/xzh
+```
+
+After the test passes, commit and push both repositories. The strict check is available for a
+release verification:
+
+```bash
+./develop.sh up --name xzh --branch develop/xzh --pushed-only
+```
+
 Use explicit ports when multiple private stacks share one Docker host:
 
 ```bash
 ./develop.sh up \
-  --port 18088 --gateway-port 18080 \
-  --api-http-port 18082 --api-grpc-port 18083 \
-  --internal-port 13081 --metrics-port 13084
+  --port 20088 --gateway-port 20080 \
+  --api-http-port 20082 --api-grpc-port 20083 \
+  --internal-port 20081 --metrics-port 20084
 ```
 
 `down` stops only containers carrying the current developer and workspace ownership labels. It

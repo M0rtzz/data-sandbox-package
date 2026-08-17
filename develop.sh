@@ -25,15 +25,16 @@ if [ "$#" -gt 0 ]; then
 fi
 
 DEV_NAME="${DATA_SANDBOX_DEV_NAME:-$(id -un)}"
-CONSOLE_PORT="${DATA_SANDBOX_DEV_PORT:-18088}"
-GATEWAY_PORT="${DATA_SANDBOX_DEV_GATEWAY_PORT:-18080}"
-API_HTTP_PORT="${DATA_SANDBOX_DEV_API_HTTP_PORT:-18082}"
-API_GRPC_PORT="${DATA_SANDBOX_DEV_API_GRPC_PORT:-18083}"
-INTERNAL_PORT="${DATA_SANDBOX_DEV_INTERNAL_PORT:-13081}"
-METRICS_PORT="${DATA_SANDBOX_DEV_METRICS_PORT:-13084}"
+CONSOLE_PORT="${DATA_SANDBOX_DEV_PORT:-19088}"
+GATEWAY_PORT="${DATA_SANDBOX_DEV_GATEWAY_PORT:-19080}"
+API_HTTP_PORT="${DATA_SANDBOX_DEV_API_HTTP_PORT:-19082}"
+API_GRPC_PORT="${DATA_SANDBOX_DEV_API_GRPC_PORT:-19083}"
+INTERNAL_PORT="${DATA_SANDBOX_DEV_INTERNAL_PORT:-19081}"
+METRICS_PORT="${DATA_SANDBOX_DEV_METRICS_PORT:-19084}"
 ADMIN_USER="${DATA_SANDBOX_DEV_ADMIN_USER:-devadmin}"
 EXPECTED_BRANCH="${DATA_SANDBOX_DEV_BRANCH:-}"
 SKIP_BUILD=false
+REQUIRE_PUSHED=false
 LOG_COMPONENT=secretpad
 KUSCIA_IMAGE="${DATA_SANDBOX_DEV_KUSCIA_IMAGE:-secretflow-registry.cn-hangzhou.cr.aliyuncs.com/secretflow/kuscia:0.13.0b0}"
 
@@ -48,15 +49,16 @@ Usage:
 
 Options:
   --name NAME            Developer identifier. Default: current system user.
-  --port PORT            SecretPad console port. Default: 18088.
-  --gateway-port PORT    Kuscia gateway port. Default: 18080.
-  --api-http-port PORT   Kuscia HTTP API port. Default: 18082.
-  --api-grpc-port PORT   Kuscia gRPC API port. Default: 18083.
-  --internal-port PORT   Kuscia internal service port. Default: 13081.
-  --metrics-port PORT    Kuscia metrics port. Default: 13084.
+  --port PORT            SecretPad console port. Default: 19088.
+  --gateway-port PORT    Kuscia gateway port. Default: 19080.
+  --api-http-port PORT   Kuscia HTTP API port. Default: 19082.
+  --api-grpc-port PORT   Kuscia gRPC API port. Default: 19083.
+  --internal-port PORT   Kuscia internal service port. Default: 19081.
+  --metrics-port PORT    Kuscia metrics port. Default: 19084.
   --admin-user USER      SecretPad developer administrator. Default: devadmin.
   --branch BRANCH        Required branch. Default: develop/<developer-name>.
   --skip-build           Reuse the existing developer image.
+  --pushed-only          Require clean worktrees synchronized with upstream before building.
   --component NAME       Log component: secretpad or kuscia.
   -h, --help             Show this help.
 
@@ -64,9 +66,10 @@ Environment overrides:
   DATA_SANDBOX_DEV_ROOT          Private runtime root. It must be below this checkout.
   DATA_SANDBOX_DEV_KUSCIA_IMAGE  Kuscia image used by the private stack.
 
-The first `up` prompts for a private developer administrator password. Runtime
-data, credentials, certificates, containers, ports, and the Docker network are
-isolated from every shared Alice/Bob deployment.
+The default `up` builds the current working tree, so developers can test before
+committing. `--pushed-only` enables the stricter commit-and-push check used for
+release verification. Runtime data, credentials, certificates, containers, ports,
+and the Docker network are isolated from every shared Alice/Bob deployment.
 EOF
 }
 
@@ -82,6 +85,7 @@ while [ "$#" -gt 0 ]; do
     --admin-user) ADMIN_USER="${2:?Missing value for --admin-user}"; shift 2 ;;
     --branch) EXPECTED_BRANCH="${2:?Missing value for --branch}"; shift 2 ;;
     --skip-build) SKIP_BUILD=true; shift ;;
+    --pushed-only) REQUIRE_PUSHED=true; shift ;;
     --component) LOG_COMPONENT="${2:?Missing value for --component}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) log_error "Unknown option: $1"; usage; exit 1 ;;
@@ -149,15 +153,6 @@ workspace_label="io.hustnlp.data-sandbox.dev-workspace"
 managed_label="io.hustnlp.data-sandbox.dev"
 
 reject_foreign_paths() {
-  local path
-  for path in "$PACKAGE_DIR" "$WORKSPACE_DIR" "$BACKEND_DIR" "$FRONTEND_DIR" "$DEV_ROOT"; do
-    case "$path" in
-      /data/xzh|/data/xzh/*|/home/xzh|/home/xzh/*|/nas/Users/xzh|/nas/Users/xzh/*)
-        log_error "Developer isolation rejected a path owned by xzh: ${path}"
-        exit 1
-        ;;
-    esac
-  done
   case "$DEV_ROOT" in
     "${WORKSPACE_DIR}"/.dev-runtime/*) ;;
     *)
@@ -185,15 +180,11 @@ require_personal_checkout() {
   done
 }
 
-verify_pushed_checkout() {
+verify_checkout() {
   local repository=$1
-  local branch upstream counts
+  local branch
   git -C "$repository" rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
     log_error "Not a Git repository: ${repository}"
-    exit 1
-  }
-  [ -z "$(git -C "$repository" status --porcelain)" ] || {
-    log_error "Uncommitted or untracked files exist in ${repository}. Commit and push them first."
     exit 1
   }
   branch="$(git -C "$repository" branch --show-current)"
@@ -201,6 +192,14 @@ verify_pushed_checkout() {
     log_error "${repository} is on ${branch:-detached HEAD}; expected ${EXPECTED_BRANCH}."
     exit 1
   }
+  if [ "$REQUIRE_PUSHED" = false ]; then
+    return 0
+  fi
+  [ -z "$(git -C "$repository" status --porcelain)" ] || {
+    log_error "Uncommitted or untracked files exist in ${repository}. Commit and push them first."
+    exit 1
+  }
+  local upstream counts
   upstream="$(git -C "$repository" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)" || {
     log_error "${repository} has no upstream branch. Push ${EXPECTED_BRANCH} first."
     exit 1
@@ -331,9 +330,12 @@ ensure_runtime_directories() {
 }
 
 build_developer_image() {
-  local generated_template="secretpad-web/src/main/resources/templates/index.html"
-  verify_pushed_checkout "$BACKEND_DIR"
-  verify_pushed_checkout "$FRONTEND_DIR"
+  local generated_template="${BACKEND_DIR}/secretpad-web/src/main/resources/templates/index.html"
+  local template_backup="${DEV_ROOT}/.build-template-backup"
+  local template_exists=false
+  local backend_status_before frontend_status_before backend_status_after frontend_status_after
+  verify_checkout "$BACKEND_DIR"
+  verify_checkout "$FRONTEND_DIR"
   if [ "$SKIP_BUILD" = true ]; then
     verify_managed_image "$SECRETPAD_IMAGE" || {
       log_error "Developer image not found: ${SECRETPAD_IMAGE}. Run up without --skip-build."
@@ -341,23 +343,45 @@ build_developer_image() {
     }
     return
   fi
-  log "Building developer image ${SECRETPAD_IMAGE} from pushed commits"
+  if [ "$REQUIRE_PUSHED" = true ]; then
+    log "Building developer image ${SECRETPAD_IMAGE} from pushed commits"
+  else
+    log "Building developer image ${SECRETPAD_IMAGE} from the current working tree"
+  fi
+  backend_status_before="$(git -C "$BACKEND_DIR" status --porcelain)"
+  frontend_status_before="$(git -C "$FRONTEND_DIR" status --porcelain)"
+  if [ -e "$generated_template" ]; then
+    cp -a "$generated_template" "$template_backup"
+    template_exists=true
+  fi
   if ! DATA_SANDBOX_DEV_IMAGE=true \
       DATA_SANDBOX_DEV_IMAGE_OWNER="$(id -un)" \
       DATA_SANDBOX_DEV_IMAGE_WORKSPACE="$WORKSPACE_DIR" \
       SECRETPAD_IMAGE="$SECRETPAD_IMAGE" \
       "${PACKAGE_DIR}/build.sh"; then
-    git -C "$BACKEND_DIR" restore --worktree -- "$generated_template"
+    if [ "$template_exists" = true ]; then
+      cp -a "$template_backup" "$generated_template"
+    else
+      rm -f "$generated_template"
+    fi
+    rm -f "$template_backup"
     log_error "Developer image build failed."
     exit 1
   fi
-  git -C "$BACKEND_DIR" restore --worktree -- "$generated_template"
-  [ -z "$(git -C "$BACKEND_DIR" status --porcelain)" ] || {
-    log_error "The build left unexpected changes in ${BACKEND_DIR}."
+  if [ "$template_exists" = true ]; then
+    cp -a "$template_backup" "$generated_template"
+  else
+    rm -f "$generated_template"
+  fi
+  rm -f "$template_backup"
+  backend_status_after="$(git -C "$BACKEND_DIR" status --porcelain)"
+  frontend_status_after="$(git -C "$FRONTEND_DIR" status --porcelain)"
+  [ "$backend_status_before" = "$backend_status_after" ] || {
+    log_error "The build changed source files in ${BACKEND_DIR}."
     exit 1
   }
-  [ -z "$(git -C "$FRONTEND_DIR" status --porcelain)" ] || {
-    log_error "The build left unexpected changes in ${FRONTEND_DIR}."
+  [ "$frontend_status_before" = "$frontend_status_after" ] || {
+    log_error "The build changed source files in ${FRONTEND_DIR}."
     exit 1
   }
   verify_managed_image "$SECRETPAD_IMAGE"
@@ -516,6 +540,41 @@ initialize_secretpad_data() {
   docker cp "${KUSCIA_CONTAINER}:/home/kuscia/var/certs/kusciaapi-client.key" "${SECRETPAD_CONFIG_DIR}/certs/client.pem"
 }
 
+register_secretpad_service() {
+  local attempt=0
+  log "Registering the private console service in Kuscia for ${DOMAIN_ID}"
+
+  if ! docker exec "$KUSCIA_CONTAINER" kubectl get service secretpad \
+      -n "$DOMAIN_ID" >/dev/null 2>&1; then
+    docker exec "$KUSCIA_CONTAINER" \
+      scripts/deploy/create_secretpad_svc.sh "$SECRETPAD_CONTAINER" "$DOMAIN_ID" \
+      >/dev/null
+  fi
+
+  # Node-to-node calls must use the internal 9001 connector. That connector
+  # authenticates the kuscia-origin-source header as a node identity; routing
+  # them to the browser-facing 8080 connector would incorrectly require a
+  # User-Token and make data synchronization fail with HTTP 404.
+  docker exec "$KUSCIA_CONTAINER" kubectl patch service secretpad \
+    -n "$DOMAIN_ID" --type merge \
+    -p "{\"spec\":{\"externalName\":\"${SECRETPAD_CONTAINER}\",\"ports\":[{\"port\":9001,\"protocol\":\"TCP\",\"targetPort\":9001}]}}" \
+    >/dev/null
+
+  while [ "$attempt" -lt 60 ]; do
+    if docker exec "$KUSCIA_CONTAINER" curl -fsS --max-time 2 \
+      -H "Host: secretpad.${DOMAIN_ID}.svc" \
+      "http://127.0.0.1:80/api/v1alpha1/data/sync" \
+      >/dev/null 2>&1; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+
+  log_error "The private console service route did not become available: secretpad.${DOMAIN_ID}.svc"
+  return 1
+}
+
 start_secretpad() {
   require_port_available "$CONSOLE_PORT" "$SECRETPAD_CONTAINER"
   if verify_managed_container "$SECRETPAD_CONTAINER"; then
@@ -552,6 +611,8 @@ start_secretpad() {
       exit 1
     }
   fi
+
+  register_secretpad_service || exit 1
 }
 
 write_manifest() {
@@ -568,6 +629,11 @@ write_manifest() {
     printf 'secretpad_frontend_commit=%s\n' "$frontend_sha"
     printf 'secretpad_image=%s\n' "$SECRETPAD_IMAGE"
     printf 'secretpad_image_id=%s\n' "$image_id"
+    if [ "$REQUIRE_PUSHED" = true ]; then
+      printf 'source_mode=pushed\n'
+    else
+      printf 'source_mode=working-tree\n'
+    fi
     printf 'console_port=%s\n' "$CONSOLE_PORT"
     printf 'kuscia_gateway_port=%s\n' "$GATEWAY_PORT"
   } >"$MANIFEST_FILE"
@@ -631,6 +697,7 @@ case "$COMMAND" in
     wait_for_kuscia_dev || { log_error "Private Kuscia did not become healthy."; exit 1; }
     docker restart "$SECRETPAD_CONTAINER" >/dev/null
     wait_for_secretpad "$CONSOLE_PORT" 180 || { log_error "Private SecretPad did not become healthy."; exit 1; }
+    register_secretpad_service || exit 1
     log_success "Private developer system restarted."
     ;;
   down)
