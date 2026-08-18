@@ -40,6 +40,8 @@ cp "${BACKEND_DIR}/target/secretpad.jar" "${PACKAGE_DIR}/artifacts/secretpad.jar
 for profile in center edge p2p; do
   cp "${BACKEND_DIR}/config/schema/${profile}/V6__data_sandbox_mvp.sql" "${PACKAGE_DIR}/config/schema/${profile}/V6__data_sandbox_mvp.sql"
   cp "${BACKEND_DIR}/config/schema/${profile}/V7__data_sandbox_runtime.sql" "${PACKAGE_DIR}/config/schema/${profile}/V7__data_sandbox_runtime.sql"
+  cp "${BACKEND_DIR}/config/schema/${profile}/V8__data_sandbox_resource.sql" "${PACKAGE_DIR}/config/schema/${profile}/V8__data_sandbox_resource.sql"
+  cp "${BACKEND_DIR}/config/schema/${profile}/V9__data_sandbox_alerts.sql" "${PACKAGE_DIR}/config/schema/${profile}/V9__data_sandbox_alerts.sql"
 done
 
 docker_build_args=()
