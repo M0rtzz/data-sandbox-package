@@ -35,6 +35,7 @@ ADMIN_USER="${DATA_SANDBOX_DEV_ADMIN_USER:-devadmin}"
 EXPECTED_BRANCH="${DATA_SANDBOX_DEV_BRANCH:-}"
 SKIP_BUILD=false
 LOG_COMPONENT=secretpad
+REQUIRE_PUSHED=false
 KUSCIA_IMAGE="${DATA_SANDBOX_DEV_KUSCIA_IMAGE:-secretflow-registry.cn-hangzhou.cr.aliyuncs.com/secretflow/kuscia:0.13.0b0}"
 
 usage() {
@@ -56,6 +57,8 @@ Options:
   --metrics-port PORT    Kuscia metrics port. Default: 13084.
   --admin-user USER      SecretPad developer administrator. Default: devadmin.
   --branch BRANCH        Required branch. Default: develop/<developer-name>.
+  --pushed-only          Build only clean, pushed, upstream-synced commits (release verification).
+                         Default: build the current working tree on --branch, dirty changes allowed.
   --skip-build           Reuse the existing developer image.
   --component NAME       Log component: secretpad or kuscia.
   -h, --help             Show this help.
@@ -81,6 +84,7 @@ while [ "$#" -gt 0 ]; do
     --metrics-port) METRICS_PORT="${2:?Missing value for --metrics-port}"; shift 2 ;;
     --admin-user) ADMIN_USER="${2:?Missing value for --admin-user}"; shift 2 ;;
     --branch) EXPECTED_BRANCH="${2:?Missing value for --branch}"; shift 2 ;;
+    --pushed-only) REQUIRE_PUSHED=true; shift ;;
     --skip-build) SKIP_BUILD=true; shift ;;
     --component) LOG_COMPONENT="${2:?Missing value for --component}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -216,6 +220,28 @@ verify_pushed_checkout() {
   }
 }
 
+# 双模式分支校验（对齐 data-sandbox-package develop/xzh 的管理员测试方法）：
+#   - 默认：仅要求当前分支 == --branch（允许未提交改动，直接在分支上测试，测试通过后再提交推送）
+#   - --pushed-only：走 verify_pushed_checkout 的严格校验（clean + upstream 同步），用于发布验证
+verify_branch() {
+  local repository=$1
+  git -C "$repository" rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
+    log_error "Not a Git repository: ${repository}"
+    exit 1
+  }
+  local branch
+  branch="$(git -C "$repository" branch --show-current)"
+  [ "$branch" = "$EXPECTED_BRANCH" ] || {
+    log_error "${repository} is on ${branch:-detached HEAD}; expected ${EXPECTED_BRANCH}."
+    exit 1
+  }
+  if [ "$REQUIRE_PUSHED" = true ]; then
+    verify_pushed_checkout "$repository"
+  else
+    log "Working-tree mode: ${repository} 构建当前工作树（分支 ${branch}，未提交改动允许，测试通过后再提交推送）。"
+  fi
+}
+
 verify_managed_container() {
   local container=$1
   local actual_owner actual_workspace managed
@@ -332,8 +358,8 @@ ensure_runtime_directories() {
 
 build_developer_image() {
   local generated_template="secretpad-web/src/main/resources/templates/index.html"
-  verify_pushed_checkout "$BACKEND_DIR"
-  verify_pushed_checkout "$FRONTEND_DIR"
+  verify_branch "$BACKEND_DIR"
+  verify_branch "$FRONTEND_DIR"
   if [ "$SKIP_BUILD" = true ]; then
     verify_managed_image "$SECRETPAD_IMAGE" || {
       log_error "Developer image not found: ${SECRETPAD_IMAGE}. Run up without --skip-build."
@@ -341,7 +367,11 @@ build_developer_image() {
     }
     return
   fi
-  log "Building developer image ${SECRETPAD_IMAGE} from pushed commits"
+  if [ "$REQUIRE_PUSHED" = true ]; then
+    log "Building developer image ${SECRETPAD_IMAGE} from pushed commits"
+  else
+    log "Building developer image ${SECRETPAD_IMAGE} from the current working tree"
+  fi
   if ! DATA_SANDBOX_DEV_IMAGE=true \
       DATA_SANDBOX_DEV_IMAGE_OWNER="$(id -un)" \
       DATA_SANDBOX_DEV_IMAGE_WORKSPACE="$WORKSPACE_DIR" \
@@ -352,14 +382,16 @@ build_developer_image() {
     exit 1
   fi
   git -C "$BACKEND_DIR" restore --worktree -- "$generated_template"
-  [ -z "$(git -C "$BACKEND_DIR" status --porcelain)" ] || {
-    log_error "The build left unexpected changes in ${BACKEND_DIR}."
-    exit 1
-  }
-  [ -z "$(git -C "$FRONTEND_DIR" status --porcelain)" ] || {
-    log_error "The build left unexpected changes in ${FRONTEND_DIR}."
-    exit 1
-  }
+  if [ "$REQUIRE_PUSHED" = true ]; then
+    [ -z "$(git -C "$BACKEND_DIR" status --porcelain)" ] || {
+      log_error "The build left unexpected changes in ${BACKEND_DIR}."
+      exit 1
+    }
+    [ -z "$(git -C "$FRONTEND_DIR" status --porcelain)" ] || {
+      log_error "The build left unexpected changes in ${FRONTEND_DIR}."
+      exit 1
+    }
+  fi
   verify_managed_image "$SECRETPAD_IMAGE"
 }
 
@@ -434,6 +466,15 @@ ensure_credentials() {
   if [ -f "$CREDENTIAL_FILE" ]; then
     chmod 600 "$CREDENTIAL_FILE"
     ADMIN_USER="$(credential_value SECRETPAD_USER_NAME)"
+    # 幂等补齐新阶段引入的环境变量（存量 env 不会自动获得新键）
+    if [ -z "$(credential_value DATA_SANDBOX_METRICS_URL)" ]; then
+      {
+        printf 'DATA_SANDBOX_METRICS_URL=http://%s:9091\n' "$KUSCIA_CONTAINER"
+        printf 'DATA_SANDBOX_METRICS_ENABLED=true\n'
+      } >>"$CREDENTIAL_FILE"
+      chmod 600 "$CREDENTIAL_FILE"
+      log "已向 secretpad.env 追加 DATA_SANDBOX_METRICS_* 环境变量。"
+    fi
     return
   fi
   local password password_confirm
@@ -468,6 +509,8 @@ ensure_credentials() {
     printf 'SECRETPAD_DATA_SANDBOX_SNAPSHOT_ROOT=/app/dev-data/snapshots\n'
     printf 'SECRETPAD_DATA_SANDBOX_BACKUP_ROOT=/app/dev-data/backups\n'
     printf 'SECRETPAD_DATA_SANDBOX_STATUS_SYNC_MS=30000\n'
+    printf 'DATA_SANDBOX_METRICS_URL=http://%s:9091\n' "$KUSCIA_CONTAINER"
+    printf 'DATA_SANDBOX_METRICS_ENABLED=true\n'
     printf 'SPRINGDOC_API_DOCS_ENABLED=true\n'
     printf 'SPRINGDOC_SWAGGER_UI_ENABLED=true\n'
     printf 'SPRING_WEB_RESOURCES_CACHE_CACHECONTROL_NO_STORE=true\n'
@@ -486,6 +529,20 @@ initialize_secretpad_data() {
     log "Copying private SecretPad configuration"
     copy_image_tree "$SECRETPAD_IMAGE" /app/config "$SECRETPAD_ROOT"
   fi
+  # 宿主 config 目录挂载覆盖镜像内 schema，新迁移（V8+）需幂等复制到宿主；
+  # cp -n 保证后续版本也能自动出现，且不覆盖 V1-V7。
+  log "Synchronizing schema migrations into the host config directory"
+  docker run --rm --entrypoint /bin/sh \
+    -v "${SECRETPAD_CONFIG_DIR}:/tmp/config" \
+    "$SECRETPAD_IMAGE" -lc '
+      set -eu
+      for mode in center edge p2p; do
+        mkdir -p "/tmp/config/schema/${mode}"
+        for f in /app/config/schema/${mode}/V*.sql; do
+          [ -e "$f" ] && cp -n "$f" "/tmp/config/schema/${mode}/" || true
+        done
+      done
+    ' </dev/null
   mkdir -p "${SECRETPAD_CONFIG_DIR}/certs"
 
   if [ ! -f "${SECRETPAD_DB_DIR}/secretpad.sqlite" ]; then
@@ -601,6 +658,30 @@ show_status() {
   fi
 }
 
+# Stage 0 门禁：优先使用 rootful docker（沙箱容器才能真正启动）。
+# 安全：不自动 sudo、不改系统配置；仅做可达性判断并给出管理员操作指引。
+check_docker_privilege() {
+  if [ -n "${DOCKER_HOST:-}" ]; then
+    docker info >/dev/null 2>&1 || {
+      log_error "已显式指定 DOCKER_HOST=${DOCKER_HOST}，但该 daemon 不可达。"
+      exit 1
+    }
+    log "Using explicit Docker daemon: ${DOCKER_HOST}"
+    return 0
+  fi
+  if docker info >/dev/null 2>&1; then
+    log "Rootful Docker 可用（默认 daemon）。"
+    return 0
+  fi
+  if id -nG | tr ' ' '\n' | grep -qx docker; then
+    log_error "已在 docker 组，但当前会话尚未获得 /var/run/docker.sock 权限，请重新登录（或 newgrp docker）后再运行。"
+    exit 1
+  fi
+  log_error "Rootful Docker 不可用：/var/run/docker.sock 当前无权限。需要管理员将 $(id -un) 加入 docker 组（重新登录生效）或配置 passwordless sudo。"
+  log_error "回退：DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock ./develop.sh up 使用 rootless daemon（沙箱容器仍受限）。"
+  exit 1
+}
+
 require_personal_checkout
 require_command docker
 require_command curl
@@ -610,6 +691,7 @@ require_command git
 case "$COMMAND" in
   up)
     require_command sha256sum
+    check_docker_privilege
     ensure_runtime_directories
     build_developer_image
     ensure_network

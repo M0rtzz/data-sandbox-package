@@ -89,20 +89,30 @@ sudo ./partner-node.sh resume bob
 `develop.sh` builds and runs a private Kuscia and SecretPad stack for a developer. It does not
 read `data-sandbox.env`, invoke `install.sh`, or reuse the shared Alice/Bob containers, ports,
 database, certificates, snapshots, or backups. Run it from a checkout owned by the developer;
-the script rejects root, foreign-owned source directories, `/data/xzh` paths, dirty worktrees,
-and commits that have not been pushed to the configured upstream branch.
+the script rejects root, foreign-owned source directories and `/data/xzh` paths.
 
-The default branch is `develop/<system-user>`. The first start prompts for a private administrator
-password and stores all runtime state below the developer's own checkout.
+### Two testing modes (branch-based)
+
+`--branch <name>` selects the branch to test (default `develop/<system-user>`). By default `up`
+builds the **current working tree** on that branch, so a developer can test changes **before
+creating a commit**; the working tree may be dirty. Test directly on the branch, then commit and
+push afterwards. Add `--pushed-only` to check that a release candidate is clean and synchronized
+with its upstream branch before building.
 
 ```bash
-./develop.sh up
+./develop.sh up                      # working-tree mode on develop/<system-user>
+./develop.sh up --branch develop/zgz --name zgz
+./develop.sh up --pushed-only        # strict: clean + pushed + upstream-synced only
 ./develop.sh status
 ./develop.sh logs --component secretpad
 ./develop.sh logs --component kuscia
 ./develop.sh restart
 ./develop.sh down
 ```
+
+`up` also verifies that a rootful Docker daemon is reachable (sandbox containers can only truly
+start under a daemon with full cgroup control). If rootful access is unavailable it stops with an
+explicit message; you can fall back to a specific daemon with `DOCKER_HOST=unix:///.../docker.sock`.
 
 Use explicit ports when multiple private stacks share one Docker host:
 
