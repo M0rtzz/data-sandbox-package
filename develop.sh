@@ -384,10 +384,19 @@ start_kuscia() {
     require_port_available "$API_HTTP_PORT" "$KUSCIA_CONTAINER"
     require_port_available "$API_GRPC_PORT" "$KUSCIA_CONTAINER"
     require_port_available "$METRICS_PORT" "$KUSCIA_CONTAINER"
-    log "Starting private Kuscia container ${KUSCIA_CONTAINER}"
+    # Rootless Docker 下 Kuscia 无法从网关自动探测宿主机 IP（"host IP unknown" 循环重启），
+    # 显式注入私有网桥网关地址
+    local host_ip_env=()
+    local host_ip
+    host_ip="$(docker network inspect "$DEV_NETWORK" --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)"
+    if [ -n "$host_ip" ]; then
+      host_ip_env=(-e "KUSCIA_HOST_IP=${host_ip}")
+    fi
+    log "Starting private Kuscia container ${KUSCIA_CONTAINER} (host_ip=${host_ip:-auto})"
     docker run -d --init --privileged --restart unless-stopped \
       --name "$KUSCIA_CONTAINER" --hostname "$KUSCIA_CONTAINER" \
       --network "$DEV_NETWORK" \
+      "${host_ip_env[@]}" \
       --label "${managed_label}=true" \
       --label "${owner_label}=$(id -un)" \
       --label "${workspace_label}=${WORKSPACE_DIR}" \
