@@ -12,6 +12,12 @@ COPY config/schema/p2p/V6__data_sandbox_mvp.sql /app/config/schema/p2p/V6__data_
 COPY config/schema/center/V7__data_sandbox_runtime.sql /app/config/schema/center/V7__data_sandbox_runtime.sql
 COPY config/schema/edge/V7__data_sandbox_runtime.sql /app/config/schema/edge/V7__data_sandbox_runtime.sql
 COPY config/schema/p2p/V7__data_sandbox_runtime.sql /app/config/schema/p2p/V7__data_sandbox_runtime.sql
+COPY config/schema/center/V8__data_sandbox_resource.sql /app/config/schema/center/V8__data_sandbox_resource.sql
+COPY config/schema/edge/V8__data_sandbox_resource.sql /app/config/schema/edge/V8__data_sandbox_resource.sql
+COPY config/schema/p2p/V8__data_sandbox_resource.sql /app/config/schema/p2p/V8__data_sandbox_resource.sql
+COPY config/schema/center/V9__data_sandbox_alerts.sql /app/config/schema/center/V9__data_sandbox_alerts.sql
+COPY config/schema/edge/V9__data_sandbox_alerts.sql /app/config/schema/edge/V9__data_sandbox_alerts.sql
+COPY config/schema/p2p/V9__data_sandbox_alerts.sql /app/config/schema/p2p/V9__data_sandbox_alerts.sql
 
 LABEL org.opencontainers.image.title="Data Sandbox MVP on SecretPad"
 LABEL org.opencontainers.image.licenses="Apache-2.0"

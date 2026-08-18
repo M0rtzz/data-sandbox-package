@@ -24,13 +24,15 @@ if [ "$#" -gt 0 ]; then
   shift
 fi
 
+# 端口约定（见 CLAUDE.md §2）：后端 8099、Kuscia 24080-24084；避开 xzh(8088/9088/1908x/1918x)、
+# 系统默认(8080/8083/13080-13084/18080-18084 等共享 alice 环境占用)与共享演示环境端口。
 DEV_NAME="${DATA_SANDBOX_DEV_NAME:-$(id -un)}"
-CONSOLE_PORT="${DATA_SANDBOX_DEV_PORT:-18088}"
-GATEWAY_PORT="${DATA_SANDBOX_DEV_GATEWAY_PORT:-18080}"
-API_HTTP_PORT="${DATA_SANDBOX_DEV_API_HTTP_PORT:-18082}"
-API_GRPC_PORT="${DATA_SANDBOX_DEV_API_GRPC_PORT:-18083}"
-INTERNAL_PORT="${DATA_SANDBOX_DEV_INTERNAL_PORT:-13081}"
-METRICS_PORT="${DATA_SANDBOX_DEV_METRICS_PORT:-13084}"
+CONSOLE_PORT="${DATA_SANDBOX_DEV_PORT:-8099}"
+GATEWAY_PORT="${DATA_SANDBOX_DEV_GATEWAY_PORT:-24080}"
+API_HTTP_PORT="${DATA_SANDBOX_DEV_API_HTTP_PORT:-24082}"
+API_GRPC_PORT="${DATA_SANDBOX_DEV_API_GRPC_PORT:-24083}"
+INTERNAL_PORT="${DATA_SANDBOX_DEV_INTERNAL_PORT:-24081}"
+METRICS_PORT="${DATA_SANDBOX_DEV_METRICS_PORT:-24084}"
 ADMIN_USER="${DATA_SANDBOX_DEV_ADMIN_USER:-devadmin}"
 EXPECTED_BRANCH="${DATA_SANDBOX_DEV_BRANCH:-}"
 SKIP_BUILD=false
@@ -475,6 +477,31 @@ ensure_credentials() {
       chmod 600 "$CREDENTIAL_FILE"
       log "已向 secretpad.env 追加 DATA_SANDBOX_METRICS_* 环境变量。"
     fi
+    # 幂等补齐 Dev 端点跳板所需 Kuscia 可达地址（同 docker 网络用容器名，Docker DNS 解析）。
+    # 必须带 SECRETPAD_DATA_SANDBOX_ 前缀：部署镜像的 config 是 base 镜像（无 data-sandbox 段），
+    # @Value("${secretpad.data-sandbox.dev-endpoint.kuscia-host:}") 仅经 relaxed binding 绑定前缀变量。
+    if [ -z "$(credential_value SECRETPAD_DATA_SANDBOX_DEV_ENDPOINT_KUSCIA_HOST)" ]; then
+      printf 'SECRETPAD_DATA_SANDBOX_DEV_ENDPOINT_KUSCIA_HOST=%s\n' "$KUSCIA_CONTAINER" >>"$CREDENTIAL_FILE"
+      chmod 600 "$CREDENTIAL_FILE"
+      log "已向 secretpad.env 追加 SECRETPAD_DATA_SANDBOX_DEV_ENDPOINT_KUSCIA_HOST=${KUSCIA_CONTAINER}。"
+    fi
+    # 幂等补齐指标采集前缀变量（与无前缀的 DATA_SANDBOX_METRICS_* 并存，前缀变量才能被 @Value 绑定）
+    if [ -z "$(credential_value SECRETPAD_DATA_SANDBOX_METRICS_URL)" ]; then
+      {
+        printf 'SECRETPAD_DATA_SANDBOX_METRICS_URL=http://%s:9091\n' "$KUSCIA_CONTAINER"
+        printf 'SECRETPAD_DATA_SANDBOX_METRICS_ENABLED=true\n'
+        printf 'SECRETPAD_DATA_SANDBOX_METRICS_INTERVAL=30000\n'
+      } >>"$CREDENTIAL_FILE"
+      chmod 600 "$CREDENTIAL_FILE"
+      log "已向 secretpad.env 追加 SECRETPAD_DATA_SANDBOX_METRICS_* 前缀变量。"
+    fi
+    # 幂等补齐 JDK HttpClient Host 头放行（Dev 端点跳板 envoy 按 Host 头路由；必须 JVM 启动参数，
+    # deployed 环境 System.setProperty 晚于 JDK Utils 静态初始化而失效 → restricted header: "host"）
+    if ! credential_value JAVA_OPTS | grep -q 'jdk.httpclient.allowRestrictedHeaders=host'; then
+      sed -i "s|^JAVA_OPTS=.*|& -Djdk.httpclient.allowRestrictedHeaders=host|" "$CREDENTIAL_FILE"
+      chmod 600 "$CREDENTIAL_FILE"
+      log "已向 secretpad.env 的 JAVA_OPTS 追加 -Djdk.httpclient.allowRestrictedHeaders=host。"
+    fi
     return
   fi
   local password password_confirm
@@ -511,10 +538,16 @@ ensure_credentials() {
     printf 'SECRETPAD_DATA_SANDBOX_STATUS_SYNC_MS=30000\n'
     printf 'DATA_SANDBOX_METRICS_URL=http://%s:9091\n' "$KUSCIA_CONTAINER"
     printf 'DATA_SANDBOX_METRICS_ENABLED=true\n'
+    printf 'SECRETPAD_DATA_SANDBOX_METRICS_URL=http://%s:9091\n' "$KUSCIA_CONTAINER"
+    printf 'SECRETPAD_DATA_SANDBOX_METRICS_ENABLED=true\n'
+    printf 'SECRETPAD_DATA_SANDBOX_METRICS_INTERVAL=30000\n'
+    printf 'SECRETPAD_DATA_SANDBOX_DEV_ENDPOINT_KUSCIA_HOST=%s\n' "$KUSCIA_CONTAINER"
     printf 'SPRINGDOC_API_DOCS_ENABLED=true\n'
     printf 'SPRINGDOC_SWAGGER_UI_ENABLED=true\n'
     printf 'SPRING_WEB_RESOURCES_CACHE_CACHECONTROL_NO_STORE=true\n'
-    printf 'JAVA_OPTS=-server -Xms512m -Xmx1536m\n'
+    # -Djdk.httpclient.allowRestrictedHeaders=host 必须作为 JVM 启动参数：deployed 环境里
+    # System.setProperty 晚于 JDK HttpClient Utils 静态初始化（restricted header: "host"）。
+    printf 'JAVA_OPTS=-server -Xms512m -Xmx1536m -Djdk.httpclient.allowRestrictedHeaders=host\n'
   } >"$CREDENTIAL_FILE"
   chmod 600 "$CREDENTIAL_FILE"
 }
