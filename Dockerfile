@@ -9,6 +9,9 @@ COPY artifacts/secretpad.jar /app/secretpad.jar
 COPY config/schema/center/V6__data_sandbox_mvp.sql /app/config/schema/center/V6__data_sandbox_mvp.sql
 COPY config/schema/edge/V6__data_sandbox_mvp.sql /app/config/schema/edge/V6__data_sandbox_mvp.sql
 COPY config/schema/p2p/V6__data_sandbox_mvp.sql /app/config/schema/p2p/V6__data_sandbox_mvp.sql
+COPY config/schema/center/V7__data_sandbox_runtime.sql /app/config/schema/center/V7__data_sandbox_runtime.sql
+COPY config/schema/edge/V7__data_sandbox_runtime.sql /app/config/schema/edge/V7__data_sandbox_runtime.sql
+COPY config/schema/p2p/V7__data_sandbox_runtime.sql /app/config/schema/p2p/V7__data_sandbox_runtime.sql
 
 LABEL org.opencontainers.image.title="Data Sandbox MVP on SecretPad"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
