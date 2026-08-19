@@ -50,6 +50,8 @@ for profile in center edge p2p; do
   cp "${BACKEND_DIR}/config/schema/${profile}/V10__sandbox_approval.sql" "${PACKAGE_DIR}/config/schema/${profile}/V10__sandbox_approval.sql"
   # Z-04：数据抽样与脱敏服务
   cp "${BACKEND_DIR}/config/schema/${profile}/V11__data_governance.sql" "${PACKAGE_DIR}/config/schema/${profile}/V11__data_governance.sql"
+  # Z-05：计算任务开发能力（制品/版本/任务/依赖/调试日志）
+  cp "${BACKEND_DIR}/config/schema/${profile}/V12__data_dev.sql" "${PACKAGE_DIR}/config/schema/${profile}/V12__data_dev.sql"
 done
 
 docker_build_args=()

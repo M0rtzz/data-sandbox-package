@@ -26,6 +26,10 @@ COPY config/schema/p2p/V10__sandbox_approval.sql /app/config/schema/p2p/V10__san
 COPY config/schema/center/V11__data_governance.sql /app/config/schema/center/V11__data_governance.sql
 COPY config/schema/edge/V11__data_governance.sql /app/config/schema/edge/V11__data_governance.sql
 COPY config/schema/p2p/V11__data_governance.sql /app/config/schema/p2p/V11__data_governance.sql
+# Z-05：计算任务开发能力（制品/版本/任务/依赖/调试日志）
+COPY config/schema/center/V12__data_dev.sql /app/config/schema/center/V12__data_dev.sql
+COPY config/schema/edge/V12__data_dev.sql /app/config/schema/edge/V12__data_dev.sql
+COPY config/schema/p2p/V12__data_dev.sql /app/config/schema/p2p/V12__data_dev.sql
 
 LABEL org.opencontainers.image.title="Data Sandbox MVP on SecretPad"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
