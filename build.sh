@@ -28,12 +28,16 @@ cp "${FRONTEND_DIR}/apps/platform/dist/index.html" "$TEMPLATE_INDEX"
 
 log "Building backend with Maven and Java 17"
 mkdir -p "${WORKSPACE_DIR}/.cache/m2"
+# maven 以 root 运行（镜像默认），构建完成后把 /workspace 里 root 属主的产物改回开发者用户，
+# 避免挂载的 BACKEND_DIR 被 root 污染而阻断后续本地 mvn 构建
 docker run --rm \
+  -e DEV_UID="$(id -u)" \
+  -e DEV_GID="$(id -g)" \
   -v "${BACKEND_DIR}:/workspace" \
   -v "${WORKSPACE_DIR}/.cache/m2:/root/.m2" \
   -w /workspace \
   maven:3.9.9-eclipse-temurin-17-noble \
-  mvn -DskipTests -Dfile.encoding=UTF-8 package
+  sh -c 'mvn -DskipTests -Dfile.encoding=UTF-8 package && chown -R --from=root "$DEV_UID:$DEV_GID" /workspace'
 
 mkdir -p "${PACKAGE_DIR}/artifacts" "${PACKAGE_DIR}/config/schema/center" "${PACKAGE_DIR}/config/schema/edge" "${PACKAGE_DIR}/config/schema/p2p"
 cp "${BACKEND_DIR}/target/secretpad.jar" "${PACKAGE_DIR}/artifacts/secretpad.jar"
