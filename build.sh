@@ -52,6 +52,8 @@ for profile in center edge p2p; do
   cp "${BACKEND_DIR}/config/schema/${profile}/V11__data_governance.sql" "${PACKAGE_DIR}/config/schema/${profile}/V11__data_governance.sql"
   # Z-05：计算任务开发能力（制品/版本/任务/依赖/调试日志）
   cp "${BACKEND_DIR}/config/schema/${profile}/V12__data_dev.sql" "${PACKAGE_DIR}/config/schema/${profile}/V12__data_dev.sql"
+  # Z-06：模型测试执行与 API 发布（审批单绑定制品/版本 + 测试证据 + 受控模型 API）
+  cp "${BACKEND_DIR}/config/schema/${profile}/V13__model_test.sql" "${PACKAGE_DIR}/config/schema/${profile}/V13__model_test.sql"
 done
 
 docker_build_args=()

@@ -30,6 +30,10 @@ COPY config/schema/p2p/V11__data_governance.sql /app/config/schema/p2p/V11__data
 COPY config/schema/center/V12__data_dev.sql /app/config/schema/center/V12__data_dev.sql
 COPY config/schema/edge/V12__data_dev.sql /app/config/schema/edge/V12__data_dev.sql
 COPY config/schema/p2p/V12__data_dev.sql /app/config/schema/p2p/V12__data_dev.sql
+# Z-06：模型测试执行与 API 发布（审批单绑定制品/版本 + 测试证据 + 受控模型 API）
+COPY config/schema/center/V13__model_test.sql /app/config/schema/center/V13__model_test.sql
+COPY config/schema/edge/V13__model_test.sql /app/config/schema/edge/V13__model_test.sql
+COPY config/schema/p2p/V13__model_test.sql /app/config/schema/p2p/V13__model_test.sql
 
 LABEL org.opencontainers.image.title="Data Sandbox MVP on SecretPad"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
