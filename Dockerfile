@@ -22,6 +22,10 @@ COPY config/schema/p2p/V9__data_sandbox_alerts.sql /app/config/schema/p2p/V9__da
 COPY config/schema/center/V10__sandbox_approval.sql /app/config/schema/center/V10__sandbox_approval.sql
 COPY config/schema/edge/V10__sandbox_approval.sql /app/config/schema/edge/V10__sandbox_approval.sql
 COPY config/schema/p2p/V10__sandbox_approval.sql /app/config/schema/p2p/V10__sandbox_approval.sql
+# Z-04：数据抽样与脱敏服务
+COPY config/schema/center/V11__data_governance.sql /app/config/schema/center/V11__data_governance.sql
+COPY config/schema/edge/V11__data_governance.sql /app/config/schema/edge/V11__data_governance.sql
+COPY config/schema/p2p/V11__data_governance.sql /app/config/schema/p2p/V11__data_governance.sql
 
 LABEL org.opencontainers.image.title="Data Sandbox MVP on SecretPad"
 LABEL org.opencontainers.image.licenses="Apache-2.0"

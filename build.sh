@@ -44,6 +44,8 @@ for profile in center edge p2p; do
   cp "${BACKEND_DIR}/config/schema/${profile}/V9__data_sandbox_alerts.sql" "${PACKAGE_DIR}/config/schema/${profile}/V9__data_sandbox_alerts.sql"
   # Z-03：沙箱资源申请与审批
   cp "${BACKEND_DIR}/config/schema/${profile}/V10__sandbox_approval.sql" "${PACKAGE_DIR}/config/schema/${profile}/V10__sandbox_approval.sql"
+  # Z-04：数据抽样与脱敏服务
+  cp "${BACKEND_DIR}/config/schema/${profile}/V11__data_governance.sql" "${PACKAGE_DIR}/config/schema/${profile}/V11__data_governance.sql"
 done
 
 docker_build_args=()
