@@ -6,7 +6,14 @@
 #
 # Build（从 docker/ 目录，共享 runner_common.py）:
 #   cd docker && docker build -f data-sandbox-jar-runner/Dockerfile -t data-sandbox-jar-runner:latest .
+# 注意：eclipse-temurin 基础镜像不含 Python，而 runner 脚本（jar_runner.py）是 Python 实现，
+#       因此需额外安装 python3 并做 `python` 别名（AppImage command 与 python-runner 一致用 `python`）。
 FROM eclipse-temurin:17-jre
+
+RUN apt-get update -qq \
+    && apt-get install -y -qq --no-install-recommends python3 \
+    && ln -sf /usr/bin/python3 /usr/bin/python \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY data-sandbox-runner-lib/runner_common.py /app/runner_common.py
 COPY data-sandbox-jar-runner/jar_runner.py /app/jar_runner.py

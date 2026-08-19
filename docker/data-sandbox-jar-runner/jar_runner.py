@@ -14,13 +14,16 @@ Data Sandbox JAR Runner 容器主程序（Z-05 计算任务运行组件 / JAR �
   5. 启动常驻 HTTP :8000（Kuscia 注入 KUSCIA_PORT_JAR_NUMBER）：
        GET /status -> ok；GET /result -> 结果 CSV；GET /log -> 执行日志。
      平台经 scope=Cluster 端点取回结果后 stopJob/deleteJob 终止容器。
+     JAR 执行失败时容器不退出，/status 返回 "failed" 并保持提供 /log，平台取回失败原因后终止
+     （调试日志不丢失）。
 
 JAR 运行契约（前端 tooltip / 说明书注明）：
   - CLI 程序把结果 CSV（含表头）写到 --output 指定路径；不写则用 stdout 作为结果 CSV。
-  - 长驻服务（非一次性 CLI）超过脚本超时上限会被 kill -> 容器退出非零 -> Job Failed。
+  - 长驻服务（非一次性 CLI）超过脚本超时上限会被 kill -> 记录超时原因并标记 failed。
 """
 import argparse
 import base64
+import json
 import os
 import sys
 
@@ -54,12 +57,12 @@ def decode_and_run(conf_path):
         "java", "-jar", JAR_PATH,
         "--input", input_path,
         "--output", RESULT_CSV,
-        "--params", params_path,
+        "--params", json.dumps(params),
     ]
     env = dict(os.environ)
     env["DS_INPUT_CSV"] = input_path
     env["DS_OUTPUT_CSV"] = RESULT_CSV
-    env["DS_PARAMS_JSON"] = params_path
+    env["DS_PARAMS_JSON"] = json.dumps(params)
     stdout = rc.run_subprocess(cmd, RUN_LOG, SCRIPT_TIMEOUT_SECS, "jar")
     return rc.fallback_result(RESULT_CSV, stdout, "jar", RUN_LOG)
 
@@ -71,14 +74,21 @@ def main():
                     default=int(os.environ.get("KUSCIA_PORT_JAR_NUMBER", "8000")))
     args = ap.parse_args()
 
-    size = decode_and_run(args.config)
-    print("[jar] finished, output bytes=%d, serving on :%d" % (size, args.port), flush=True)
-    rc.serve(args.port, RESULT_CSV, RUN_LOG)
+    status = "ok"
+    try:
+        size = decode_and_run(args.config)
+        print("[jar] finished, output bytes=%d, serving on :%d" % (size, args.port), flush=True)
+    except Exception as exc:  # JAR 执行失败：不退出，记录原因并标记 failed，常驻供平台取回 /log
+        with open(RUN_LOG, "a", encoding="utf-8") as f:
+            f.write("[jar] EXECUTION FAILED: %s\n" % exc)
+        sys.stderr.write("[jar] execution failed: %s\n" % exc)
+        status = "failed"
+    rc.serve(args.port, RESULT_CSV, RUN_LOG, status=status)
 
 
 if __name__ == "__main__":
     try:
         main()
-    except Exception as exc:  # 执行失败 -> 非零退出 -> Kuscia Job Failed
+    except Exception as exc:  # 致命错误（如端口占用）-> 非零退出 -> Kuscia Job Failed
         sys.stderr.write("[jar] FATAL: %s\n" % exc)
         sys.exit(1)

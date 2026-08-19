@@ -10,16 +10,19 @@ Data Sandbox Python Runner 容器主程序（Z-05 计算任务运行组件 / PYT
      "allowed_imports": [<平台白名单放行的顶层模块名>]}。
   3. 给用户脚本前置「import 守卫 prologue」：用 builtins.__import__ 包裹，顶层模块必须 ∈
      allowed_imports ∪ sys.stdlib_module_names，否则抛 ImportError("dependency not allowed: <top>")
-     -> 脚本失败 -> 容器退出非零 -> Job Failed（平台日志可见明确错误）。
+     -> 脚本执行失败。
   4. 以 `python3 script_guarded.py --input ... --output ... --params ...` 执行（子进程、超时保护），
      执行日志写 /tmp/py/run.log。
   5. 脚本未写 output.csv 时以 stdout 兜底作为结果 CSV。
   6. 常驻 HTTP :8000（Kuscia 注入 KUSCIA_PORT_PY_NUMBER）：/status /result /log。
+     脚本失败时容器不退出，改为 /status 返回 "failed" 并保持提供 /log，平台取回失败原因日志后
+     stopJob 终止容器（调试日志不再丢失，error_message 含真实错误如 ImportError）。
 
 硬保证（镜像层 + 调度层）：容器无网络（network_policy + 仅结果 Cluster 端口）、无 pip、仅预装白名单包；
 即使 import 守卫被绕过，也无法导入非白名单三方包。
 """
 import argparse
+import json
 import os
 import sys
 
@@ -35,7 +38,14 @@ SCRIPT_TIMEOUT_SECS = int(os.environ.get("PY_SCRIPT_TIMEOUT_SECS", "240"))
 
 IMPORT_GUARD_PROLOGUE = '''
 import builtins as _ds_builtins, sys as _ds_sys
+# 放行集 = 平台白名单（allowed_imports）∪ 标准库 ∪ 镜像内已安装的顶层包。
+# 关键：白名单包的传递依赖（如 pandas -> dateutil/pytz/tzdata/six）在镜像内已安装，必须放行，
+#       否则 pandas 自身 import 被误伤；硬边界 = 镜像预装集（无网络/无 pip，仅 numpy/pandas 及其依赖），
+#       未安装的包（如 requests）无论怎么写都会被拒 -> 运行侧兜底生效。
 _ds_allowed = set(__DS_ALLOWED_IMPORTS__) | set(getattr(_ds_sys, "stdlib_module_names", ()))
+import pkgutil as _ds_pkgutil
+for _ds_m in _ds_pkgutil.iter_modules():
+    _ds_allowed.add(_ds_m.name)
 _ds_orig_import = _ds_builtins.__import__
 def _ds_guarded_import(_ds_name, _ds_globals=None, _ds_locals=None, _ds_fromlist=(), _ds_level=0):
     if _ds_level > 0:
@@ -79,7 +89,7 @@ def decode_and_run(conf_path):
         sys.executable, SCRIPT_PATH,
         "--input", input_path,
         "--output", RESULT_CSV,
-        "--params", params_path,
+        "--params", json.dumps(params),
     ]
     stdout = rc.run_subprocess(cmd, RUN_LOG, SCRIPT_TIMEOUT_SECS, "py")
     return rc.fallback_result(RESULT_CSV, stdout, "py", RUN_LOG)
@@ -92,14 +102,21 @@ def main():
                     default=int(os.environ.get("KUSCIA_PORT_PY_NUMBER", "8000")))
     args = ap.parse_args()
 
-    size = decode_and_run(args.config)
-    print("[py] finished, output bytes=%d, serving on :%d" % (size, args.port), flush=True)
-    rc.serve(args.port, RESULT_CSV, RUN_LOG)
+    status = "ok"
+    try:
+        size = decode_and_run(args.config)
+        print("[py] finished, output bytes=%d, serving on :%d" % (size, args.port), flush=True)
+    except Exception as exc:  # 脚本执行失败：不退出，记录原因并标记 failed，常驻供平台取回 /log
+        with open(RUN_LOG, "a", encoding="utf-8") as f:
+            f.write("[py] EXECUTION FAILED: %s\n" % exc)
+        sys.stderr.write("[py] execution failed: %s\n" % exc)
+        status = "failed"
+    rc.serve(args.port, RESULT_CSV, RUN_LOG, status=status)
 
 
 if __name__ == "__main__":
     try:
         main()
-    except Exception as exc:  # 执行失败 -> 非零退出 -> Kuscia Job Failed
+    except Exception as exc:  # 致命错误（如端口占用）-> 非零退出 -> Kuscia Job Failed
         sys.stderr.write("[py] FATAL: %s\n" % exc)
         sys.exit(1)
