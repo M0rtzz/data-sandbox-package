@@ -18,6 +18,10 @@ COPY config/schema/p2p/V8__data_sandbox_resource.sql /app/config/schema/p2p/V8__
 COPY config/schema/center/V9__data_sandbox_alerts.sql /app/config/schema/center/V9__data_sandbox_alerts.sql
 COPY config/schema/edge/V9__data_sandbox_alerts.sql /app/config/schema/edge/V9__data_sandbox_alerts.sql
 COPY config/schema/p2p/V9__data_sandbox_alerts.sql /app/config/schema/p2p/V9__data_sandbox_alerts.sql
+# Z-03：沙箱资源申请与审批
+COPY config/schema/center/V10__sandbox_approval.sql /app/config/schema/center/V10__sandbox_approval.sql
+COPY config/schema/edge/V10__sandbox_approval.sql /app/config/schema/edge/V10__sandbox_approval.sql
+COPY config/schema/p2p/V10__sandbox_approval.sql /app/config/schema/p2p/V10__sandbox_approval.sql
 
 LABEL org.opencontainers.image.title="Data Sandbox MVP on SecretPad"
 LABEL org.opencontainers.image.licenses="Apache-2.0"

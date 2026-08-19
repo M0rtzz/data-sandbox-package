@@ -544,6 +544,12 @@ ensure_credentials() {
       chmod 600 "$CREDENTIAL_FILE"
       log "已向 secretpad.env 追加 SECRETPAD_DATA_SANDBOX_WEBSOCKET_GATEWAY=${KUSCIA_CONTAINER}:10082。"
     fi
+    # Z-03：沙箱资源申请审批门禁（approval.required，默认 true 也显式写入便于运维感知）
+    if [ -z "$(credential_value SECRETPAD_DATA_SANDBOX_APPROVAL_REQUIRED)" ]; then
+      printf 'SECRETPAD_DATA_SANDBOX_APPROVAL_REQUIRED=true\n' >>"$CREDENTIAL_FILE"
+      chmod 600 "$CREDENTIAL_FILE"
+      log "已向 secretpad.env 追加 SECRETPAD_DATA_SANDBOX_APPROVAL_REQUIRED=true。"
+    fi
     return
   fi
   local password password_confirm
@@ -584,6 +590,7 @@ ensure_credentials() {
     printf 'SECRETPAD_DATA_SANDBOX_METRICS_URL=http://%s:9091\n' "$KUSCIA_CONTAINER"
     printf 'SECRETPAD_DATA_SANDBOX_METRICS_ENABLED=true\n'
     printf 'SECRETPAD_DATA_SANDBOX_METRICS_INTERVAL=30000\n'
+    printf 'SECRETPAD_DATA_SANDBOX_APPROVAL_REQUIRED=true\n'
     printf 'SPRINGDOC_API_DOCS_ENABLED=true\n'
     printf 'SPRINGDOC_SWAGGER_UI_ENABLED=true\n'
     printf 'SPRING_WEB_RESOURCES_CACHE_CACHECONTROL_NO_STORE=true\n'
