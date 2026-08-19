@@ -462,6 +462,39 @@ start_kuscia() {
         -sha256 -CAcreateserial -out kusciaapi-client.crt
     '
   fi
+
+  ensure_ws_tunnel
+}
+
+# 在 kuscia 容器内启动 WS/TCP 隧道：kuscia 0.13.0b0 网关无 upgrade_configs，WS 升级被
+# 403 拒绝，Jupyter 内核/终端需经隧道直连 pod（见 scripts/ws-tunnel.py 头部说明）。
+# 隧道进程随 kuscia 容器 restart 而消失，本函数幂等，每次 up/restart 都会重跑。
+ensure_ws_tunnel() {
+  docker cp "${PACKAGE_DIR}/scripts/ws-tunnel.py" "$KUSCIA_CONTAINER":/opt/ws-tunnel.py
+  docker exec "$KUSCIA_CONTAINER" pkill -f '/opt/ws-tunnel.py' >/dev/null 2>&1 || true
+  docker exec -d "$KUSCIA_CONTAINER" sh -c 'while true; do python3 /opt/ws-tunnel.py; sleep 2; done'
+  local ok=0
+  for _ in 1 2 3 4 5 6 7 8; do
+    if docker exec "$KUSCIA_CONTAINER" python3 -c \
+        'import socket;s=socket.create_connection(("127.0.0.1",10082),timeout=2);s.close()' \
+        >/dev/null 2>&1; then
+      ok=1
+      break
+    fi
+    sleep 1
+  done
+  if [ "$ok" -ne 1 ]; then
+    log_error "ws-tunnel did not start listening on ${KUSCIA_CONTAINER}:10082 (see /opt/ws-tunnel.log in the container)"
+    exit 1
+  fi
+  log "ws-tunnel 已启动：${KUSCIA_CONTAINER}:10082"
+}
+
+stop_ws_tunnel() {
+  if verify_managed_container "$KUSCIA_CONTAINER" &&
+     docker inspect --format '{{.State.Running}}' "$KUSCIA_CONTAINER" 2>/dev/null | grep -qx true; then
+    docker exec "$KUSCIA_CONTAINER" pkill -f '/opt/ws-tunnel.py' >/dev/null 2>&1 || true
+  fi
 }
 
 ensure_credentials() {
@@ -477,13 +510,14 @@ ensure_credentials() {
       chmod 600 "$CREDENTIAL_FILE"
       log "已向 secretpad.env 追加 DATA_SANDBOX_METRICS_* 环境变量。"
     fi
-    # 幂等补齐 Dev 端点跳板所需 Kuscia 可达地址（同 docker 网络用容器名，Docker DNS 解析）。
-    # 必须带 SECRETPAD_DATA_SANDBOX_ 前缀：部署镜像的 config 是 base 镜像（无 data-sandbox 段），
-    # @Value("${secretpad.data-sandbox.dev-endpoint.kuscia-host:}") 仅经 relaxed binding 绑定前缀变量。
-    if [ -z "$(credential_value SECRETPAD_DATA_SANDBOX_DEV_ENDPOINT_KUSCIA_HOST)" ]; then
-      printf 'SECRETPAD_DATA_SANDBOX_DEV_ENDPOINT_KUSCIA_HOST=%s\n' "$KUSCIA_CONTAINER" >>"$CREDENTIAL_FILE"
+    # 幂等补齐 Kuscia 网关地址（KUSCIA_GW_ADDRESS → secretpad.gateway）：Dev 端点跳板对
+    # .svc 集群端点经 Kuscia envoy（容器 :80 按 Host 头路由到沙箱容器）转发，secretpad
+    # 容器与 kuscia 同 docker 网络，用容器名 + :80 即可被 Docker DNS 解析。
+    # 注意：这是 base 配置 `${KUSCIA_GW_ADDRESS:127.0.0.1:80}` 的环境占位符，非 @Value 前缀变量。
+    if [ -z "$(credential_value KUSCIA_GW_ADDRESS)" ]; then
+      printf 'KUSCIA_GW_ADDRESS=%s:80\n' "$KUSCIA_CONTAINER" >>"$CREDENTIAL_FILE"
       chmod 600 "$CREDENTIAL_FILE"
-      log "已向 secretpad.env 追加 SECRETPAD_DATA_SANDBOX_DEV_ENDPOINT_KUSCIA_HOST=${KUSCIA_CONTAINER}。"
+      log "已向 secretpad.env 追加 KUSCIA_GW_ADDRESS=${KUSCIA_CONTAINER}:80。"
     fi
     # 幂等补齐指标采集前缀变量（与无前缀的 DATA_SANDBOX_METRICS_* 并存，前缀变量才能被 @Value 绑定）
     if [ -z "$(credential_value SECRETPAD_DATA_SANDBOX_METRICS_URL)" ]; then
@@ -501,6 +535,14 @@ ensure_credentials() {
       sed -i "s|^JAVA_OPTS=.*|& -Djdk.httpclient.allowRestrictedHeaders=host|" "$CREDENTIAL_FILE"
       chmod 600 "$CREDENTIAL_FILE"
       log "已向 secretpad.env 的 JAVA_OPTS 追加 -Djdk.httpclient.allowRestrictedHeaders=host。"
+    fi
+    # 幂等补齐 WS 隧道网关地址（secretpad.data-sandbox.websocket-gateway）：kuscia 网关不支持
+    # WS 升级，桥的 WS 连接改走 kuscia 容器内隧道（:10082）。与 KUSCIA_GW_ADDRESS(:80) 并存：
+    # HTTP 走网关、WS 走隧道。首次应用必须走 up（secretpad 容器 recreate 才读新 env）。
+    if [ -z "$(credential_value SECRETPAD_DATA_SANDBOX_WEBSOCKET_GATEWAY)" ]; then
+      printf 'SECRETPAD_DATA_SANDBOX_WEBSOCKET_GATEWAY=%s:10082\n' "$KUSCIA_CONTAINER" >>"$CREDENTIAL_FILE"
+      chmod 600 "$CREDENTIAL_FILE"
+      log "已向 secretpad.env 追加 SECRETPAD_DATA_SANDBOX_WEBSOCKET_GATEWAY=${KUSCIA_CONTAINER}:10082。"
     fi
     return
   fi
@@ -530,6 +572,7 @@ ensure_credentials() {
     printf 'KUSCIA_PROTOCOL=mtls\n'
     printf 'KUSCIA_API_ADDRESS=%s:8083\n' "$KUSCIA_CONTAINER"
     printf 'KUSCIA_GW_ADDRESS=%s:80\n' "$KUSCIA_CONTAINER"
+    printf 'SECRETPAD_DATA_SANDBOX_WEBSOCKET_GATEWAY=%s:10082\n' "$KUSCIA_CONTAINER"
     printf 'SECRETPAD_USER_NAME=%s\n' "$ADMIN_USER"
     printf 'SECRETPAD_PASSWORD=%s\n' "$password"
     printf 'SECRETPAD_DATA_SANDBOX_KUSCIA_ENABLED=true\n'
@@ -541,7 +584,6 @@ ensure_credentials() {
     printf 'SECRETPAD_DATA_SANDBOX_METRICS_URL=http://%s:9091\n' "$KUSCIA_CONTAINER"
     printf 'SECRETPAD_DATA_SANDBOX_METRICS_ENABLED=true\n'
     printf 'SECRETPAD_DATA_SANDBOX_METRICS_INTERVAL=30000\n'
-    printf 'SECRETPAD_DATA_SANDBOX_DEV_ENDPOINT_KUSCIA_HOST=%s\n' "$KUSCIA_CONTAINER"
     printf 'SPRINGDOC_API_DOCS_ENABLED=true\n'
     printf 'SPRINGDOC_SWAGGER_UI_ENABLED=true\n'
     printf 'SPRING_WEB_RESOURCES_CACHE_CACHECONTROL_NO_STORE=true\n'
@@ -753,11 +795,14 @@ case "$COMMAND" in
     verify_managed_container "$SECRETPAD_CONTAINER" || { log_error "Private SecretPad is not created."; exit 1; }
     docker restart "$KUSCIA_CONTAINER" >/dev/null
     wait_for_kuscia_dev || { log_error "Private Kuscia did not become healthy."; exit 1; }
+    ensure_credentials
+    ensure_ws_tunnel
     docker restart "$SECRETPAD_CONTAINER" >/dev/null
     wait_for_secretpad "$CONSOLE_PORT" 180 || { log_error "Private SecretPad did not become healthy."; exit 1; }
     log_success "Private developer system restarted."
     ;;
   down)
+    stop_ws_tunnel
     if verify_managed_container "$SECRETPAD_CONTAINER"; then
       docker stop "$SECRETPAD_CONTAINER" >/dev/null
     fi

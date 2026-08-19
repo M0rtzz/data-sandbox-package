@@ -2,3 +2,5 @@ artifacts/
 config/
 .runtime.env
 data-sandbox.env
+
+__pycache__/
