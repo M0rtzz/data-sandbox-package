@@ -4,11 +4,15 @@
 #       执行用户脚本写结果 CSV，然后常驻 HTTP 服务 :8000 提供 /status /result /log，
 #       平台经 scope=Cluster 端点取回结果后 stopJob/deleteJob 终止容器。
 #
-# Build:  cd docker/data-sandbox-sampler && docker build -t data-sandbox-sampler:latest .
+# 公共逻辑委托 runner_common.py（与 jar/python runner 共享）。
+#
+# Build（从 docker/ 目录，共享 runner_common.py）:
+#   cd docker && docker build -f data-sandbox-sampler/Dockerfile -t data-sandbox-sampler:latest .
 FROM python:3.11-slim
 
-COPY sampler_server.py /app/sampler_server.py
-COPY start.sh /app/start.sh
+COPY data-sandbox-runner-lib/runner_common.py /app/runner_common.py
+COPY data-sandbox-sampler/sampler_server.py /app/sampler_server.py
+COPY data-sandbox-sampler/start.sh /app/start.sh
 RUN chmod +x /app/start.sh
 
 WORKDIR /app
