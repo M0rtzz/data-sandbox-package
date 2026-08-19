@@ -664,11 +664,30 @@ initialize_secretpad_data() {
   docker cp "${KUSCIA_CONTAINER}:/home/kuscia/var/certs/kusciaapi-client.key" "${SECRETPAD_CONFIG_DIR}/certs/client.pem"
 }
 
+# Z-04 Stage 5.2：一次性迁移旧 secretpad/data → kuscia/data（marker 幂等），
+# 使旧上传表在挂载修复后的新路径仍可读。
+migrate_secretpad_data_dir() {
+  local marker="${DEV_ROOT}/.dev-data-migrated"
+  if [ -d "$SECRETPAD_DATA_DIR" ] && [ ! -f "$marker" ]; then
+    if [ -n "$(ls -A "$SECRETPAD_DATA_DIR" 2>/dev/null | head -1)" ]; then
+      log "一次性迁移 ${SECRETPAD_DATA_DIR} → ${KUSCIA_DATA_DIR}（旧上传表在新路径仍可读）"
+      mkdir -p "$KUSCIA_DATA_DIR"
+      cp -rn "$SECRETPAD_DATA_DIR"/. "$KUSCIA_DATA_DIR"/
+    fi
+    touch "$marker"
+  fi
+}
+
 start_secretpad() {
   require_port_available "$CONSOLE_PORT" "$SECRETPAD_CONTAINER"
   if verify_managed_container "$SECRETPAD_CONTAINER"; then
     docker rm -f "$SECRETPAD_CONTAINER" >/dev/null
   fi
+  # Z-04 Stage 5.2 挂载修复：secretpad /app/data 改挂 kuscia storage 同源宿主目录
+  # （${KUSCIA_DATA_DIR} = ${DEV_ROOT}/kuscia/data，对齐官方 scripts/deploy/secretpad.sh
+  #  的 PAD_INSTALL_DIR/KUSCIA_INSTALL_DIR 同目录关系），使上传/产出表 dev 的
+  #  SecretFlow/Kuscia 同源可读。旧 secretpad/data 内容一次性拷贝兜底（marker 幂等）。
+  migrate_secretpad_data_dir
   log "Starting private SecretPad container ${SECRETPAD_CONTAINER}"
   docker run -d --init --restart unless-stopped \
     --name "$SECRETPAD_CONTAINER" --network "$DEV_NETWORK" \
@@ -679,7 +698,7 @@ start_secretpad() {
     --env-file "$CREDENTIAL_FILE" \
     -v "${SECRETPAD_CONFIG_DIR}:/app/config" \
     -v "${SECRETPAD_DB_DIR}:/app/db" \
-    -v "${SECRETPAD_DATA_DIR}:/app/data" \
+    -v "${KUSCIA_DATA_DIR}:/app/data" \
     -v "${SECRETPAD_LOG_DIR}:/app/log" \
     -v "${SNAPSHOT_DIR}:/app/dev-data/snapshots" \
     -v "${BACKUP_DIR}:/app/dev-data/backups" \
