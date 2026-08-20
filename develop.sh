@@ -560,10 +560,39 @@ initialize_secretpad_data() {
     log "Copying private SecretPad configuration"
     copy_image_tree "$SECRETPAD_IMAGE" /app/config "$SECRETPAD_ROOT"
   fi
+  local config_file
+  for config_file in \
+    "${SECRETPAD_CONFIG_DIR}/application.yaml" \
+    "${SECRETPAD_CONFIG_DIR}/application-p2p.yaml" \
+    "${SECRETPAD_CONFIG_DIR}/application-edge.yaml" \
+    "${SECRETPAD_CONFIG_DIR}/application-test.yaml"; do
+    if [ -f "$config_file" ] && \
+      ! grep -q 'org.secretflow.secretpad.persistence.entity.ProjectAssetDO' "$config_file"; then
+      if ! grep -q 'org.secretflow.secretpad.persistence.entity.ProjectDatatableDO' "$config_file"; then
+        log_error "Unable to update data sync entities: ProjectDatatableDO is missing from ${config_file}"
+        exit 1
+      fi
+      log "Adding project asset synchronization to ${config_file}"
+      sed -i \
+        '/org.secretflow.secretpad.persistence.entity.ProjectDatatableDO/a\    - org.secretflow.secretpad.persistence.entity.ProjectAssetDO' \
+        "$config_file"
+    fi
+    if [ -f "$config_file" ] && \
+      ! grep -q 'org.secretflow.secretpad.persistence.entity.SandboxApprovalSyncDO' "$config_file"; then
+      if ! grep -q 'org.secretflow.secretpad.persistence.entity.ProjectAssetDO' "$config_file"; then
+        log_error "Unable to update data sync entities: ProjectAssetDO is missing from ${config_file}"
+        exit 1
+      fi
+      log "Adding sandbox approval synchronization to ${config_file}"
+      sed -i \
+        '/org.secretflow.secretpad.persistence.entity.ProjectAssetDO/a\    - org.secretflow.secretpad.persistence.entity.SandboxApprovalSyncDO' \
+        "$config_file"
+    fi
+  done
   local profile version
   for profile in center edge p2p; do
     mkdir -p "${SECRETPAD_CONFIG_DIR}/schema/${profile}"
-    for version in 14 15 16 17 18 19 20 21; do
+    for version in 14 15 16 17 18 19 20 21 22 23; do
       cp "${BACKEND_DIR}/config/schema/${profile}/V${version}__"*.sql \
         "${SECRETPAD_CONFIG_DIR}/schema/${profile}/"
     done
