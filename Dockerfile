@@ -6,9 +6,9 @@ ARG DEV_OWNER=""
 ARG DEV_WORKSPACE=""
 
 COPY artifacts/secretpad.jar /app/secretpad.jar
-COPY config/schema/center/V6__data_sandbox_mvp.sql /app/config/schema/center/V6__data_sandbox_mvp.sql
-COPY config/schema/edge/V6__data_sandbox_mvp.sql /app/config/schema/edge/V6__data_sandbox_mvp.sql
-COPY config/schema/p2p/V6__data_sandbox_mvp.sql /app/config/schema/p2p/V6__data_sandbox_mvp.sql
+COPY config/schema/center/ /app/config/schema/center/
+COPY config/schema/edge/ /app/config/schema/edge/
+COPY config/schema/p2p/ /app/config/schema/p2p/
 
 LABEL org.opencontainers.image.title="Data Sandbox MVP on SecretPad"
 LABEL org.opencontainers.image.licenses="Apache-2.0"

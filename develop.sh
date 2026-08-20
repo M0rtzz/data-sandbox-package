@@ -37,6 +37,7 @@ SKIP_BUILD=false
 REQUIRE_PUSHED=false
 LOG_COMPONENT=secretpad
 KUSCIA_IMAGE="${DATA_SANDBOX_DEV_KUSCIA_IMAGE:-secretflow-registry.cn-hangzhou.cr.aliyuncs.com/secretflow/kuscia:0.13.0b0}"
+MINIO_IMAGE="${DATA_SANDBOX_DEV_MINIO_IMAGE:-minio/minio:RELEASE.2025-04-22T22-12-26Z}"
 
 usage() {
   cat <<'EOF'
@@ -65,6 +66,7 @@ Options:
 Environment overrides:
   DATA_SANDBOX_DEV_ROOT          Private runtime root. It must be below this checkout.
   DATA_SANDBOX_DEV_KUSCIA_IMAGE  Kuscia image used by the private stack.
+  DATA_SANDBOX_DEV_MINIO_IMAGE   MinIO image used for private immutable assets.
 
 The default `up` builds the current working tree, so developers can test before
 committing. `--pushed-only` enables the stricter commit-and-push check used for
@@ -127,6 +129,7 @@ DEV_ROOT="$(realpath -m "$DEV_ROOT")"
 DEV_PREFIX="data-sandbox-dev-${DEV_NAME}"
 KUSCIA_CONTAINER="${DEV_PREFIX}-kuscia"
 SECRETPAD_CONTAINER="${DEV_PREFIX}-secretpad"
+MINIO_CONTAINER="${DEV_PREFIX}-minio"
 DEV_NETWORK="${DEV_PREFIX}"
 SECRETPAD_IMAGE="data-sandbox-secretpad:dev-${DEV_NAME}"
 DOMAIN_ID="dev-${DEV_NAME}"
@@ -143,6 +146,7 @@ SECRETPAD_CONFIG_DIR="${SECRETPAD_ROOT}/config"
 SECRETPAD_DB_DIR="${SECRETPAD_ROOT}/db"
 SECRETPAD_DATA_DIR="${SECRETPAD_ROOT}/data"
 SECRETPAD_LOG_DIR="${SECRETPAD_ROOT}/log"
+MINIO_DATA_DIR="${DEV_ROOT}/minio"
 SNAPSHOT_DIR="${DEV_ROOT}/snapshots"
 BACKUP_DIR="${DEV_ROOT}/backups"
 CREDENTIAL_FILE="${DEV_ROOT}/secretpad.env"
@@ -325,7 +329,7 @@ ensure_runtime_directories() {
   mkdir -p "$KUSCIA_CONFIG_DIR" "$KUSCIA_DATA_DIR" "$KUSCIA_LOG_DIR"
   mkdir -p "$KUSCIA_IMAGE_DIR" "$KUSCIA_K3S_DIR" "$KUSCIA_CONTAINERD_DIR"
   mkdir -p "$SECRETPAD_ROOT" "$SECRETPAD_DB_DIR" "$SECRETPAD_DATA_DIR" "$SECRETPAD_LOG_DIR"
-  mkdir -p "$SNAPSHOT_DIR" "$BACKUP_DIR"
+  mkdir -p "$MINIO_DATA_DIR" "$SNAPSHOT_DIR" "$BACKUP_DIR"
   chmod 700 "$DEV_ROOT"
 }
 
@@ -449,6 +453,7 @@ ensure_credentials() {
   if [ -f "$CREDENTIAL_FILE" ]; then
     chmod 600 "$CREDENTIAL_FILE"
     ADMIN_USER="$(credential_value SECRETPAD_USER_NAME)"
+    ensure_minio_credentials
     return
   fi
   local password password_confirm
@@ -483,6 +488,13 @@ ensure_credentials() {
     printf 'SECRETPAD_DATA_SANDBOX_SNAPSHOT_ROOT=/app/dev-data/snapshots\n'
     printf 'SECRETPAD_DATA_SANDBOX_BACKUP_ROOT=/app/dev-data/backups\n'
     printf 'SECRETPAD_DATA_SANDBOX_STATUS_SYNC_MS=30000\n'
+    printf 'MINIO_ROOT_USER=data-sandbox-%s\n' "$DEV_NAME"
+    printf 'MINIO_ROOT_PASSWORD=%s\n' "$(printf '%s' "$password" | sha256sum | awk '{print $1}')"
+    printf 'MINIO_KMS_SECRET_KEY=data-sandbox-key:%s\n' "$(printf '%s' "${password}:${DEV_NAME}:kms" | openssl dgst -sha256 -binary | openssl base64 -A)"
+    printf 'SECRETPAD_DATA_ASSETS_MINIO_ENDPOINT=http://%s:9000\n' "$MINIO_CONTAINER"
+    printf 'SECRETPAD_DATA_ASSETS_MINIO_ACCESS_KEY=data-sandbox-%s\n' "$DEV_NAME"
+    printf 'SECRETPAD_DATA_ASSETS_MINIO_SECRET_KEY=%s\n' "$(printf '%s' "$password" | sha256sum | awk '{print $1}')"
+    printf 'SECRETPAD_DATA_ASSETS_MINIO_BUCKET=data-sandbox-assets\n'
     printf 'SPRINGDOC_API_DOCS_ENABLED=true\n'
     printf 'SPRINGDOC_SWAGGER_UI_ENABLED=true\n'
     printf 'SPRING_WEB_RESOURCES_CACHE_CACHECONTROL_NO_STORE=true\n'
@@ -491,9 +503,56 @@ ensure_credentials() {
   chmod 600 "$CREDENTIAL_FILE"
 }
 
+ensure_minio_credentials() {
+  grep -q '^MINIO_ROOT_USER=' "$CREDENTIAL_FILE" && return
+  local password secret kms_key
+  password="$(credential_value SECRETPAD_PASSWORD)"
+  secret="$(printf '%s' "$password" | sha256sum | awk '{print $1}')"
+  kms_key="$(printf '%s' "${password}:${DEV_NAME}:kms" | openssl dgst -sha256 -binary | openssl base64 -A)"
+  {
+    printf 'MINIO_ROOT_USER=data-sandbox-%s\n' "$DEV_NAME"
+    printf 'MINIO_ROOT_PASSWORD=%s\n' "$secret"
+    printf 'MINIO_KMS_SECRET_KEY=data-sandbox-key:%s\n' "$kms_key"
+    printf 'SECRETPAD_DATA_ASSETS_MINIO_ENDPOINT=http://%s:9000\n' "$MINIO_CONTAINER"
+    printf 'SECRETPAD_DATA_ASSETS_MINIO_ACCESS_KEY=data-sandbox-%s\n' "$DEV_NAME"
+    printf 'SECRETPAD_DATA_ASSETS_MINIO_SECRET_KEY=%s\n' "$secret"
+    printf 'SECRETPAD_DATA_ASSETS_MINIO_BUCKET=data-sandbox-assets\n'
+  } >>"$CREDENTIAL_FILE"
+  chmod 600 "$CREDENTIAL_FILE"
+}
+
 credential_value() {
   local key=$1
   sed -n "s/^${key}=//p" "$CREDENTIAL_FILE" | head -n 1
+}
+
+start_minio() {
+  if verify_managed_container "$MINIO_CONTAINER"; then
+    docker rm -f "$MINIO_CONTAINER" >/dev/null
+  fi
+  log "Starting private MinIO container ${MINIO_CONTAINER}"
+  docker run -d --init --restart unless-stopped \
+    --name "$MINIO_CONTAINER" --network "$DEV_NETWORK" \
+    --label "${managed_label}=true" \
+    --label "${owner_label}=$(id -un)" \
+    --label "${workspace_label}=${WORKSPACE_DIR}" \
+    -e "MINIO_ROOT_USER=$(credential_value MINIO_ROOT_USER)" \
+    -e "MINIO_ROOT_PASSWORD=$(credential_value MINIO_ROOT_PASSWORD)" \
+    -e "MINIO_KMS_SECRET_KEY=$(credential_value MINIO_KMS_SECRET_KEY)" \
+    -v "${MINIO_DATA_DIR}:/data" \
+    "$MINIO_IMAGE" server /data >/dev/null
+
+  local attempt=0
+  while [ "$attempt" -lt 60 ]; do
+    if docker exec "$KUSCIA_CONTAINER" curl -fsS --max-time 2 \
+      "http://${MINIO_CONTAINER}:9000/minio/health/live" >/dev/null 2>&1; then
+      return
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  log_error "Private MinIO did not become healthy: docker logs ${MINIO_CONTAINER}"
+  exit 1
 }
 
 initialize_secretpad_data() {
@@ -501,6 +560,14 @@ initialize_secretpad_data() {
     log "Copying private SecretPad configuration"
     copy_image_tree "$SECRETPAD_IMAGE" /app/config "$SECRETPAD_ROOT"
   fi
+  local profile version
+  for profile in center edge p2p; do
+    mkdir -p "${SECRETPAD_CONFIG_DIR}/schema/${profile}"
+    for version in 14 15 16 17 18 19 20 21; do
+      cp "${BACKEND_DIR}/config/schema/${profile}/V${version}__"*.sql \
+        "${SECRETPAD_CONFIG_DIR}/schema/${profile}/"
+    done
+  done
   mkdir -p "${SECRETPAD_CONFIG_DIR}/certs"
 
   if [ ! -f "${SECRETPAD_DB_DIR}/secretpad.sqlite" ]; then
@@ -645,7 +712,7 @@ show_status() {
   printf 'Runtime:   %s\n' "$DEV_ROOT"
   printf 'Console:   http://127.0.0.1:%s/edge?tab=sandbox-manager\n' "$CONSOLE_PORT"
   printf '\nContainers:\n'
-  for container in "$KUSCIA_CONTAINER" "$SECRETPAD_CONTAINER"; do
+  for container in "$KUSCIA_CONTAINER" "$MINIO_CONTAINER" "$SECRETPAD_CONTAINER"; do
     if verify_managed_container "$container"; then
       docker inspect --format '  {{.Name}}: {{.State.Status}} ({{.Config.Image}})' "$container"
     else
@@ -663,6 +730,7 @@ require_command docker
 require_command curl
 require_command realpath
 require_command git
+require_command openssl
 
 case "$COMMAND" in
   up)
@@ -672,6 +740,7 @@ case "$COMMAND" in
     ensure_network
     start_kuscia
     ensure_credentials
+    start_minio
     initialize_secretpad_data
     start_secretpad
     write_manifest
@@ -685,16 +754,19 @@ case "$COMMAND" in
     case "$LOG_COMPONENT" in
       secretpad) target="$SECRETPAD_CONTAINER" ;;
       kuscia) target="$KUSCIA_CONTAINER" ;;
-      *) log_error "Log component must be secretpad or kuscia."; exit 1 ;;
+      minio) target="$MINIO_CONTAINER" ;;
+      *) log_error "Log component must be secretpad, kuscia, or minio."; exit 1 ;;
     esac
     verify_managed_container "$target" || { log_error "Container not found: ${target}"; exit 1; }
     exec docker logs --tail 300 -f "$target"
     ;;
   restart)
     verify_managed_container "$KUSCIA_CONTAINER" || { log_error "Private Kuscia is not created."; exit 1; }
+    verify_managed_container "$MINIO_CONTAINER" || { log_error "Private MinIO is not created."; exit 1; }
     verify_managed_container "$SECRETPAD_CONTAINER" || { log_error "Private SecretPad is not created."; exit 1; }
     docker restart "$KUSCIA_CONTAINER" >/dev/null
     wait_for_kuscia_dev || { log_error "Private Kuscia did not become healthy."; exit 1; }
+    docker restart "$MINIO_CONTAINER" >/dev/null
     docker restart "$SECRETPAD_CONTAINER" >/dev/null
     wait_for_secretpad "$CONSOLE_PORT" 180 || { log_error "Private SecretPad did not become healthy."; exit 1; }
     register_secretpad_service || exit 1
@@ -703,6 +775,9 @@ case "$COMMAND" in
   down)
     if verify_managed_container "$SECRETPAD_CONTAINER"; then
       docker stop "$SECRETPAD_CONTAINER" >/dev/null
+    fi
+    if verify_managed_container "$MINIO_CONTAINER"; then
+      docker stop "$MINIO_CONTAINER" >/dev/null
     fi
     if verify_managed_container "$KUSCIA_CONTAINER"; then
       docker stop "$KUSCIA_CONTAINER" >/dev/null
