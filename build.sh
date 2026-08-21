@@ -45,6 +45,9 @@ for profile in center edge p2p; do
   # ds_resource_allocation; copying only the latest migrations leaves existing
   # developer databases with missing resource tables.
   cp "${BACKEND_DIR}/config/schema/${profile}"/V*.sql "${PACKAGE_DIR}/config/schema/${profile}/"
+  # V13 is a legacy duplicate of V17 (model test). Running it out of order
+  # against databases that already applied V17 duplicates artifact columns.
+  rm -f "${PACKAGE_DIR}/config/schema/${profile}/V13__model_test.sql"
 done
 
 docker_build_args=()

@@ -665,6 +665,8 @@ initialize_secretpad_data() {
     # ds_resource_allocation in freshly built developer runtimes.
     cp "${BACKEND_DIR}/config/schema/${profile}"/V*.sql \
       "${SECRETPAD_CONFIG_DIR}/schema/${profile}/"
+    # V13 duplicates V17 and cannot be safely replayed out of order.
+    rm -f "${SECRETPAD_CONFIG_DIR}/schema/${profile}/V13__model_test.sql"
   done
   mkdir -p "${SECRETPAD_CONFIG_DIR}/certs"
 
