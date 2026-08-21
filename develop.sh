@@ -655,10 +655,11 @@ initialize_secretpad_data() {
   local profile version
   for profile in center edge p2p; do
     mkdir -p "${SECRETPAD_CONFIG_DIR}/schema/${profile}"
-    for version in 14 15 16 17 18 19 20 21 22 23; do
-      cp "${BACKEND_DIR}/config/schema/${profile}/V${version}__"*.sql \
-        "${SECRETPAD_CONFIG_DIR}/schema/${profile}/"
-    done
+    # Copy the complete migration chain, including V7-V13. Older versions of
+    # this script copied only V6 and V14+, causing missing tables such as
+    # ds_resource_allocation in freshly built developer runtimes.
+    cp "${BACKEND_DIR}/config/schema/${profile}"/V*.sql \
+      "${SECRETPAD_CONFIG_DIR}/schema/${profile}/"
   done
   mkdir -p "${SECRETPAD_CONFIG_DIR}/certs"
 
