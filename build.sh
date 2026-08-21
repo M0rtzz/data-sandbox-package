@@ -41,6 +41,7 @@ docker run --rm \
 mkdir -p "${PACKAGE_DIR}/artifacts" "${PACKAGE_DIR}/config/schema/center" "${PACKAGE_DIR}/config/schema/edge" "${PACKAGE_DIR}/config/schema/p2p"
 cp "${BACKEND_DIR}/target/secretpad.jar" "${PACKAGE_DIR}/artifacts/secretpad.jar"
 for profile in center edge p2p; do
+  find "${PACKAGE_DIR}/config/schema/${profile}" -maxdepth 1 -type f -name 'V*.sql' -delete
   # Keep the packaged Flyway history complete. In particular, V8 creates
   # ds_resource_allocation; copying only the latest migrations leaves existing
   # developer databases with missing resource tables.

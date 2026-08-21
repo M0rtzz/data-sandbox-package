@@ -660,6 +660,9 @@ initialize_secretpad_data() {
   local profile version
   for profile in center edge p2p; do
     mkdir -p "${SECRETPAD_CONFIG_DIR}/schema/${profile}"
+    # Remove migrations from older builds before copying the current chain;
+    # otherwise renamed migrations can leave duplicate Flyway versions behind.
+    find "${SECRETPAD_CONFIG_DIR}/schema/${profile}" -maxdepth 1 -type f -name 'V*.sql' -delete
     # Copy the complete migration chain, including V7-V13. Older versions of
     # this script copied only V6 and V14+, causing missing tables such as
     # ds_resource_allocation in freshly built developer runtimes.
