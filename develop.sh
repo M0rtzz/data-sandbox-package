@@ -405,7 +405,42 @@ start_kuscia() {
   fi
 
   if verify_managed_container "$KUSCIA_CONTAINER"; then
-    docker start "$KUSCIA_CONTAINER" >/dev/null
+    local kuscia_status kuscia_nofile
+    kuscia_status="$(docker inspect --format '{{.State.Status}}' "$KUSCIA_CONTAINER")"
+    kuscia_nofile="$(docker inspect --format '{{range .HostConfig.Ulimits}}{{if eq .Name "nofile"}}{{.Soft}}:{{.Hard}}{{end}}{{end}}' "$KUSCIA_CONTAINER")"
+    # Older developer containers were created without a file-descriptor limit.
+    # Recreate those containers so containerd can install its CNI watchers.
+    if [ "$kuscia_status" = "restarting" ] || [ "$kuscia_nofile" != "1048576:1048576" ]; then
+      docker rm -f "$KUSCIA_CONTAINER" >/dev/null
+      kuscia_status=""
+    fi
+    if [ -n "$kuscia_status" ]; then
+      docker start "$KUSCIA_CONTAINER" >/dev/null
+    else
+      require_port_available "$INTERNAL_PORT" "$KUSCIA_CONTAINER"
+      require_port_available "$GATEWAY_PORT" "$KUSCIA_CONTAINER"
+      require_port_available "$API_HTTP_PORT" "$KUSCIA_CONTAINER"
+      require_port_available "$API_GRPC_PORT" "$KUSCIA_CONTAINER"
+      require_port_available "$METRICS_PORT" "$KUSCIA_CONTAINER"
+      log "Starting private Kuscia container ${KUSCIA_CONTAINER}"
+      docker run -d --init --privileged --restart unless-stopped \
+        --ulimit nofile=1048576:1048576 \
+        --name "$KUSCIA_CONTAINER" --hostname "$KUSCIA_CONTAINER" \
+        --network "$DEV_NETWORK" \
+        --label "${managed_label}=true" \
+        --label "${owner_label}=$(id -un)" \
+        --label "${workspace_label}=${WORKSPACE_DIR}" \
+        -p "${INTERNAL_PORT}:80" -p "${GATEWAY_PORT}:1080" \
+        -p "${API_HTTP_PORT}:8082" -p "${API_GRPC_PORT}:8083" \
+        -p "${METRICS_PORT}:9091" \
+        -v "${KUSCIA_CONFIG_DIR}/kuscia.yaml:/home/kuscia/etc/conf/kuscia.yaml" \
+        -v "${KUSCIA_DATA_DIR}:/home/kuscia/var/storage/data" \
+        -v "${KUSCIA_LOG_DIR}:/home/kuscia/var/stdout" \
+        -v "${KUSCIA_IMAGE_DIR}:/home/kuscia/var/images" \
+        -v "${KUSCIA_K3S_DIR}:/home/kuscia/var/k3s/server/db" \
+        -v "${KUSCIA_CONTAINERD_DIR}:/home/kuscia/containerd" \
+        "$KUSCIA_IMAGE" bin/kuscia start -c etc/conf/kuscia.yaml >/dev/null
+    fi
   else
     require_port_available "$INTERNAL_PORT" "$KUSCIA_CONTAINER"
     require_port_available "$GATEWAY_PORT" "$KUSCIA_CONTAINER"
@@ -414,6 +449,7 @@ start_kuscia() {
     require_port_available "$METRICS_PORT" "$KUSCIA_CONTAINER"
     log "Starting private Kuscia container ${KUSCIA_CONTAINER}"
     docker run -d --init --privileged --restart unless-stopped \
+      --ulimit nofile=1048576:1048576 \
       --name "$KUSCIA_CONTAINER" --hostname "$KUSCIA_CONTAINER" \
       --network "$DEV_NETWORK" \
       --label "${managed_label}=true" \
