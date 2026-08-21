@@ -33,7 +33,7 @@ docker run --rm \
   -v "${WORKSPACE_DIR}/.cache/m2:/root/.m2" \
   -w /workspace \
   maven:3.9.9-eclipse-temurin-17-noble \
-  mvn -DskipTests -Dfile.encoding=UTF-8 package
+  mvn clean -Dmaven.test.skip=true -Dfile.encoding=UTF-8 package
 
 mkdir -p "${PACKAGE_DIR}/artifacts" "${PACKAGE_DIR}/config/schema/center" "${PACKAGE_DIR}/config/schema/edge" "${PACKAGE_DIR}/config/schema/p2p"
 cp "${BACKEND_DIR}/target/secretpad.jar" "${PACKAGE_DIR}/artifacts/secretpad.jar"
