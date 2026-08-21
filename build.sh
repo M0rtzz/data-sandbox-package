@@ -16,6 +16,9 @@ require_command pnpm
 log "Building local SecretPad frontend"
 (
   cd "$FRONTEND_DIR"
+  # Build workspace packages such as @secretflow/dag and @secretflow/utils
+  # before Umi resolves their package entrypoints during the platform build.
+  pnpm run setup
   pnpm --filter secretpad build
 )
 
