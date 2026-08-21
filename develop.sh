@@ -656,6 +656,11 @@ initialize_secretpad_data() {
       log "Enabling out-of-order Flyway recovery in ${config_file}"
       sed -i '/^      - filesystem:.*schema\//a\    out-of-order: true' "$config_file"
     fi
+    if [ -f "$config_file" ] && grep -q '^flyway:' "$config_file" && \
+      ! grep -q '^    validate-on-migrate:' "$config_file"; then
+      log "Disabling Flyway checksum validation for developer runtime in ${config_file}"
+      sed -i '/^    out-of-order: true/a\    validate-on-migrate: false\n    ignore-migration-patterns:\n      - '\''*:missing'\''' "$config_file"
+    fi
   done
   local profile version
   for profile in center edge p2p; do
