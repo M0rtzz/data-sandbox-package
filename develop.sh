@@ -278,6 +278,33 @@ require_port_available() {
   fi
 }
 
+check_host_inotify_limits() {
+  local instances_file=/proc/sys/fs/inotify/max_user_instances
+  local watches_file=/proc/sys/fs/inotify/max_user_watches
+  local instances watches
+  local minimum_instances=1024
+  local minimum_watches=1048576
+
+  # Kuscia's embedded containerd watches its CNI and runtime directories.  A
+  # low host inotify quota makes the Kuscia process exit immediately, which
+  # Docker reports only as a restart loop.
+  if [ ! -r "$instances_file" ] || [ ! -r "$watches_file" ]; then
+    return 0
+  fi
+  instances="$(<"$instances_file")"
+  watches="$(<"$watches_file")"
+  if [ "$instances" -ge "$minimum_instances" ] && [ "$watches" -ge "$minimum_watches" ]; then
+    return 0
+  fi
+
+  log_error "Host inotify limits are too low for Kuscia (instances=${instances}, watches=${watches})."
+  log_error "Run as root, then retry:"
+  log_error "  sudo sysctl -w fs.inotify.max_user_instances=${minimum_instances}"
+  log_error "  sudo sysctl -w fs.inotify.max_user_watches=${minimum_watches}"
+  log_error "For persistence, add both settings to /etc/sysctl.d/99-data-sandbox.conf and run sudo sysctl --system."
+  exit 1
+}
+
 copy_image_tree() {
   local image=$1
   local source=$2
@@ -800,6 +827,7 @@ require_command openssl
 case "$COMMAND" in
   up)
     require_command sha256sum
+    check_host_inotify_limits
     ensure_runtime_directories
     build_developer_image
     ensure_network
@@ -826,6 +854,7 @@ case "$COMMAND" in
     exec docker logs --tail 300 -f "$target"
     ;;
   restart)
+    check_host_inotify_limits
     verify_managed_container "$KUSCIA_CONTAINER" || { log_error "Private Kuscia is not created."; exit 1; }
     verify_managed_container "$MINIO_CONTAINER" || { log_error "Private MinIO is not created."; exit 1; }
     verify_managed_container "$SECRETPAD_CONTAINER" || { log_error "Private SecretPad is not created."; exit 1; }
