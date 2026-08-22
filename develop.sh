@@ -758,6 +758,7 @@ start_secretpad() {
   log "Starting private SecretPad container ${SECRETPAD_CONTAINER}"
   docker run -d --init --restart unless-stopped \
     --name "$SECRETPAD_CONTAINER" --network "$DEV_NETWORK" \
+    --add-host host.docker.internal:host-gateway \
     --label "${managed_label}=true" \
     --label "${owner_label}=$(id -un)" \
     --label "${workspace_label}=${WORKSPACE_DIR}" \

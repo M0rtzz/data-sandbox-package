@@ -79,6 +79,7 @@ docker stop "$SOURCE_SECRETPAD_CONTAINER" >/dev/null
 docker rename "$SOURCE_SECRETPAD_CONTAINER" "$PREVIOUS_CONTAINER"
 
 run_args=(--init --name "$SECRETPAD_CONTAINER" --restart always --network "$NETWORK" -p "${SECRETPAD_PORT}:8080" --env-file "$RUNTIME_ENV")
+run_args+=(--add-host host.docker.internal:host-gateway)
 run_args+=(-v "${CONFIG_SOURCE}:/app/config" -v "${DB_SOURCE}:/app/db")
 [ -n "$DATA_SOURCE" ] && run_args+=(-v "${DATA_SOURCE}:/app/data")
 [ -n "$LOG_SOURCE" ] && run_args+=(-v "${LOG_SOURCE}:/app/log")
