@@ -7,8 +7,13 @@ PACKAGE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(cd "${PACKAGE_DIR}/.." && pwd)"
 BACKEND_DIR="${WORKSPACE_DIR}/secretpad"
 FRONTEND_DIR="${WORKSPACE_DIR}/secretpad-frontend"
+REQUESTED_SECRETPAD_IMAGE="${SECRETPAD_IMAGE-}"
 source "${PACKAGE_DIR}/deploy/common/log.sh"
 source "${PACKAGE_DIR}/deploy/common/utils.sh"
+load_env "${PACKAGE_DIR}"
+if [ -n "${REQUESTED_SECRETPAD_IMAGE}" ]; then
+  SECRETPAD_IMAGE="${REQUESTED_SECRETPAD_IMAGE}"
+fi
 
 require_command docker
 require_command pnpm

@@ -3,7 +3,8 @@
 # Licensed under the Apache License, Version 2.0.
 
 # Build and run a fully isolated developer stack from the current checkout.
-# This script never reads data-sandbox.env and never touches a shared deployment.
+# It reads data-sandbox.env for shared deployment and image defaults, while
+# keeping its own DATA_SANDBOX_DEV_* ports and runtime directory isolated.
 set -Eeuo pipefail
 
 PACKAGE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,6 +16,7 @@ FRONTEND_DIR="$(realpath -m "${WORKSPACE_DIR}/secretpad-frontend")"
 source "${PACKAGE_DIR}/deploy/common/log.sh"
 # shellcheck source=deploy/common/utils.sh
 source "${PACKAGE_DIR}/deploy/common/utils.sh"
+load_env "${PACKAGE_DIR}"
 
 case "${1:-help}" in
   -h|--help) COMMAND=help ;;
