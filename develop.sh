@@ -34,6 +34,7 @@ API_GRPC_PORT="${DATA_SANDBOX_DEV_API_GRPC_PORT:-19083}"
 INTERNAL_PORT="${DATA_SANDBOX_DEV_INTERNAL_PORT:-19081}"
 METRICS_PORT="${DATA_SANDBOX_DEV_METRICS_PORT:-19084}"
 ADMIN_USER="${DATA_SANDBOX_DEV_ADMIN_USER:-devadmin}"
+ADVERTISE_HOST="${DATA_SANDBOX_DEV_ADVERTISE_HOST:-}"
 EXPECTED_BRANCH="${DATA_SANDBOX_DEV_BRANCH:-}"
 SKIP_BUILD=false
 REQUIRE_PUSHED=false
@@ -58,6 +59,8 @@ Options:
   --api-grpc-port PORT   Kuscia gRPC API port. Default: 19083.
   --internal-port PORT   Kuscia internal service port. Default: 19081.
   --metrics-port PORT    Kuscia metrics port. Default: 19084.
+  --advertise-host HOST  Host that peers use to reach this instance's gateway.
+                         Default: this machine's outbound IP address.
   --admin-user USER      SecretPad developer administrator. Default: devadmin.
   --branch BRANCH        Required branch. Default: develop/<developer-name>.
   --skip-build           Reuse the existing developer image.
@@ -87,6 +90,7 @@ while [ "$#" -gt 0 ]; do
     --internal-port) INTERNAL_PORT="${2:?Missing value for --internal-port}"; shift 2 ;;
     --metrics-port) METRICS_PORT="${2:?Missing value for --metrics-port}"; shift 2 ;;
     --admin-user) ADMIN_USER="${2:?Missing value for --admin-user}"; shift 2 ;;
+    --advertise-host) ADVERTISE_HOST="${2:?Missing value for --advertise-host}"; shift 2 ;;
     --branch) EXPECTED_BRANCH="${2:?Missing value for --branch}"; shift 2 ;;
     --skip-build) SKIP_BUILD=true; shift ;;
     --pushed-only) REQUIRE_PUSHED=true; shift ;;
@@ -320,6 +324,28 @@ copy_image_tree() {
 }
 
 sqlite_exec() {
+  local sql=$1
+  docker run --rm --entrypoint sqlite3 \
+    -v "${SECRETPAD_DB_DIR}:/db" \
+    "$SECRETPAD_IMAGE" /db/secretpad.sqlite "$sql"
+}
+
+# 本机对外 IP。各开发实例的容器分处独立 Docker 网络，容器名只在同网络内可解析，
+# 跨实例协作必须经宿主机与已映射的网关端口。
+resolve_advertise_host() {
+  if [ -n "$ADVERTISE_HOST" ]; then
+    printf '%s' "$ADVERTISE_HOST"
+    return 0
+  fi
+  local address
+  address="$(ip route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<NF; i++) if ($i == "src") {print $(i+1); exit}}')"
+  if [ -z "$address" ]; then
+    address="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  fi
+  printf '%s' "$address"
+}
+
+sqlite_query() {
   local sql=$1
   docker run --rm --entrypoint sqlite3 \
     -v "${SECRETPAD_DB_DIR}:/db" \
@@ -779,9 +805,20 @@ start_secretpad() {
     exit 1
   fi
 
-  if [ ! -f "${SECRETPAD_ROOT}/.node-address-configured" ]; then
+  # 本节点对外通告的地址，会被打进节点认证码并由对端直接用于建立路由，
+  # 因此以当前实际值为准判断是否需要更新，不能只在首次部署时写一次。
+  local advertise_host node_address current_address
+  advertise_host="$(resolve_advertise_host)"
+  if [ -z "$advertise_host" ]; then
+    log_error "Unable to determine this machine's address; pass --advertise-host explicitly."
+    exit 1
+  fi
+  node_address="https://${advertise_host}:${GATEWAY_PORT}"
+  current_address="$(sqlite_query "select net_address from node where node_id='${DOMAIN_ID}';" 2>/dev/null || true)"
+  if [ "$current_address" != "$node_address" ]; then
+    log "Advertising node ${DOMAIN_ID} at ${node_address}"
     docker stop "$SECRETPAD_CONTAINER" >/dev/null
-    sqlite_exec "update node set net_address='https://${KUSCIA_CONTAINER}:1080' where node_id='${DOMAIN_ID}';"
+    sqlite_exec "update node set net_address='${node_address}' where node_id='${DOMAIN_ID}';"
     touch "${SECRETPAD_ROOT}/.node-address-configured"
     docker start "$SECRETPAD_CONTAINER" >/dev/null
     wait_for_secretpad "$CONSOLE_PORT" 180 || {
@@ -814,6 +851,7 @@ write_manifest() {
     fi
     printf 'console_port=%s\n' "$CONSOLE_PORT"
     printf 'kuscia_gateway_port=%s\n' "$GATEWAY_PORT"
+    printf 'advertise_host=%s\n' "$(resolve_advertise_host)"
   } >"$MANIFEST_FILE"
 }
 
