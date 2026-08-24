@@ -41,6 +41,9 @@ REQUIRE_PUSHED=false
 LOG_COMPONENT=secretpad
 KUSCIA_IMAGE="${DATA_SANDBOX_DEV_KUSCIA_IMAGE:-secretflow-registry.cn-hangzhou.cr.aliyuncs.com/secretflow/kuscia:0.13.0b0}"
 MINIO_IMAGE="${DATA_SANDBOX_DEV_MINIO_IMAGE:-minio/minio:RELEASE.2025-04-22T22-12-26Z}"
+SAMPLER_IMAGE="${DATA_SANDBOX_DEV_SAMPLER_IMAGE:-data-sandbox-sampler:latest}"
+SAMPLER_DOCKER_DIR="${PACKAGE_DIR}/docker/data-sandbox-sampler"
+RUNNER_LIB_DIR="${PACKAGE_DIR}/docker/data-sandbox-runner-lib"
 
 usage() {
   cat <<'EOF'
@@ -72,6 +75,7 @@ Environment overrides:
   DATA_SANDBOX_DEV_ROOT          Private runtime root. It must be below this checkout.
   DATA_SANDBOX_DEV_KUSCIA_IMAGE  Kuscia image used by the private stack.
   DATA_SANDBOX_DEV_MINIO_IMAGE   MinIO image used for private immutable assets.
+  DATA_SANDBOX_DEV_SAMPLER_IMAGE Sampler image used by custom governance tasks.
 
 The default `up` builds the current working tree, so developers can test before
 committing. `--pushed-only` enables the stricter commit-and-push check used for
@@ -444,6 +448,91 @@ build_developer_image() {
     exit 1
   }
   verify_managed_image "$SECRETPAD_IMAGE"
+}
+
+sampler_source_hash() {
+  sha256sum \
+    "${SAMPLER_DOCKER_DIR}/Dockerfile" \
+    "${SAMPLER_DOCKER_DIR}/sampler_server.py" \
+    "${SAMPLER_DOCKER_DIR}/start.sh" \
+    "${RUNNER_LIB_DIR}/runner_common.py" \
+    | sha256sum | awk '{print $1}'
+}
+
+build_sampler_image() {
+  local required_file source_hash current_hash
+  for required_file in \
+      "${SAMPLER_DOCKER_DIR}/Dockerfile" \
+      "${SAMPLER_DOCKER_DIR}/sampler_server.py" \
+      "${SAMPLER_DOCKER_DIR}/start.sh" \
+      "${RUNNER_LIB_DIR}/runner_common.py"; do
+    [ -f "$required_file" ] || {
+      log_error "Sampler build file is missing: ${required_file}"
+      exit 1
+    }
+  done
+
+  source_hash="$(sampler_source_hash)"
+  current_hash="$(docker image inspect --format '{{index .Config.Labels "io.hustnlp.data-sandbox.sampler-source-sha256"}}' \
+    "$SAMPLER_IMAGE" 2>/dev/null || true)"
+  if [ "$current_hash" = "$source_hash" ]; then
+    log "Sampler image is current: ${SAMPLER_IMAGE}"
+    return
+  fi
+
+  log "Building sampler image ${SAMPLER_IMAGE}"
+  docker build \
+    --label "io.hustnlp.data-sandbox.sampler-source-sha256=${source_hash}" \
+    -f "${SAMPLER_DOCKER_DIR}/Dockerfile" \
+    -t "$SAMPLER_IMAGE" \
+    "${PACKAGE_DIR}/docker"
+}
+
+import_sampler_image() {
+  local host_image_id image_tar container_image_tar
+  host_image_id="$(docker image inspect --format '{{.Id}}' "$SAMPLER_IMAGE")"
+  if docker exec "$KUSCIA_CONTAINER" /home/kuscia/bin/crictl images -q 2>/dev/null \
+      | grep -Fxq "$host_image_id"; then
+    log "Sampler image is already imported into ${KUSCIA_CONTAINER}"
+    return
+  fi
+
+  image_tar="$(mktemp "${KUSCIA_IMAGE_DIR}/data-sandbox-sampler.XXXXXX.tar")"
+  container_image_tar="/home/kuscia/var/images/$(basename "$image_tar")"
+  log "Importing ${SAMPLER_IMAGE} into ${KUSCIA_CONTAINER}"
+  docker save -o "$image_tar" "$SAMPLER_IMAGE"
+  if ! docker exec "$KUSCIA_CONTAINER" /home/kuscia/bin/ctr -n k8s.io images import "$container_image_tar"; then
+    rm -f "$image_tar"
+    log_error "Failed to import ${SAMPLER_IMAGE} into ${KUSCIA_CONTAINER}."
+    exit 1
+  fi
+  rm -f "$image_tar"
+
+  docker exec "$KUSCIA_CONTAINER" /home/kuscia/bin/crictl images -q 2>/dev/null \
+    | grep -Fxq "$host_image_id" || {
+      log_error "Imported sampler image ID does not match the host image: ${host_image_id}"
+      exit 1
+    }
+}
+
+ensure_sampler_runtime() {
+  local register_script appimage
+  register_script="${BACKEND_DIR}/scripts/deploy/data-sandbox/register-data-sandbox-sampler-appimages.sh"
+  [ -x "$register_script" ] || {
+    log_error "Sampler AppImage registration script is missing or not executable: ${register_script}"
+    exit 1
+  }
+
+  build_sampler_image
+  import_sampler_image
+  DATA_SANDBOX_SAMPLER_IMAGE="$SAMPLER_IMAGE" "$register_script" "$KUSCIA_CONTAINER"
+  for appimage in data-sandbox-sampler data-sandbox-sampler-nonet; do
+    docker exec "$KUSCIA_CONTAINER" kubectl get appimage.kuscia.secretflow "$appimage" >/dev/null 2>&1 || {
+      log_error "Sampler AppImage registration failed: ${appimage}"
+      exit 1
+    }
+  done
+  log_success "Sampler image and AppImages are ready in ${KUSCIA_CONTAINER}."
 }
 
 start_kuscia() {
@@ -831,10 +920,11 @@ start_secretpad() {
 }
 
 write_manifest() {
-  local backend_sha frontend_sha image_id
+  local backend_sha frontend_sha image_id sampler_image_id
   backend_sha="$(git -C "$BACKEND_DIR" rev-parse HEAD)"
   frontend_sha="$(git -C "$FRONTEND_DIR" rev-parse HEAD)"
   image_id="$(docker image inspect --format '{{.Id}}' "$SECRETPAD_IMAGE")"
+  sampler_image_id="$(docker image inspect --format '{{.Id}}' "$SAMPLER_IMAGE")"
   umask 077
   {
     printf 'built_at=%s\n' "$(date --iso-8601=seconds)"
@@ -844,6 +934,8 @@ write_manifest() {
     printf 'secretpad_frontend_commit=%s\n' "$frontend_sha"
     printf 'secretpad_image=%s\n' "$SECRETPAD_IMAGE"
     printf 'secretpad_image_id=%s\n' "$image_id"
+    printf 'sampler_image=%s\n' "$SAMPLER_IMAGE"
+    printf 'sampler_image_id=%s\n' "$sampler_image_id"
     if [ "$REQUIRE_PUSHED" = true ]; then
       printf 'source_mode=pushed\n'
     else
@@ -880,6 +972,7 @@ require_command curl
 require_command realpath
 require_command git
 require_command openssl
+require_command sha256sum
 
 case "$COMMAND" in
   up)
@@ -889,6 +982,7 @@ case "$COMMAND" in
     build_developer_image
     ensure_network
     start_kuscia
+    ensure_sampler_runtime
     ensure_credentials
     start_minio
     initialize_secretpad_data
@@ -917,6 +1011,7 @@ case "$COMMAND" in
     verify_managed_container "$SECRETPAD_CONTAINER" || { log_error "Private SecretPad is not created."; exit 1; }
     docker restart "$KUSCIA_CONTAINER" >/dev/null
     wait_for_kuscia_dev || { log_error "Private Kuscia did not become healthy."; exit 1; }
+    ensure_sampler_runtime
     docker restart "$MINIO_CONTAINER" >/dev/null
     docker restart "$SECRETPAD_CONTAINER" >/dev/null
     wait_for_secretpad "$CONSOLE_PORT" 180 || { log_error "Private SecretPad did not become healthy."; exit 1; }
