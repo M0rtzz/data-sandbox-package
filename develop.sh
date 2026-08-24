@@ -501,7 +501,9 @@ import_sampler_image() {
   container_image_tar="/home/kuscia/var/images/$(basename "$image_tar")"
   log "Importing ${SAMPLER_IMAGE} into ${KUSCIA_CONTAINER}"
   docker save -o "$image_tar" "$SAMPLER_IMAGE"
-  if ! docker exec "$KUSCIA_CONTAINER" /home/kuscia/bin/ctr -n k8s.io images import "$container_image_tar"; then
+  if ! docker exec "$KUSCIA_CONTAINER" /home/kuscia/bin/ctr \
+      --address /home/kuscia/containerd/run/containerd.sock \
+      -n k8s.io images import "$container_image_tar"; then
     rm -f "$image_tar"
     log_error "Failed to import ${SAMPLER_IMAGE} into ${KUSCIA_CONTAINER}."
     exit 1
