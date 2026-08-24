@@ -8,8 +8,8 @@ Data Sandbox Sampler 容器主程序（Z-04 自定义代码执行）。
      "task_input_config" 渲染为 JSON 字符串字段，runner_common.load_config 二次解析。
   2. payload = {"script": <python 源码>, "input_csv_b64": <base64 授权输入子集 CSV>,
      "params": {...}}。base64 解码写 /tmp/sampler/input.csv，脚本写 script.py，参数写 params.json。
-  3. 以 `python3 script.py --input ... --output ... --params ...` 执行用户脚本（子进程、
-     超时保护），执行日志写 /tmp/sampler/run.log。
+  3. 以 `python3 script.py --input ... --output ...` 执行用户脚本；params 非空时追加
+     `--params ...`，兼容无需自定义参数的脚本。执行日志写 /tmp/sampler/run.log。
   4. 脚本未写 output.csv 时以 stdout 兜底作为结果 CSV。
   5. 启动常驻 HTTP :8000（Kuscia 注入 KUSCIA_PORT_SAMPLER_NUMBER）：
        GET /status -> ok；GET /result -> 结果 CSV；GET /log -> 执行日志。
@@ -45,16 +45,17 @@ def decode_and_run(conf_path):
     if not input_b64.strip():
         raise ValueError("input_csv_b64 empty")
 
+    input_path, params_path = rc.write_inputs(WORKDIR, input_b64, params)
     with open(SCRIPT_PATH, "w", encoding="utf-8") as f:
         f.write(script)
-    input_path, params_path = rc.write_inputs(WORKDIR, input_b64, params)
 
     cmd = [
         sys.executable, SCRIPT_PATH,
         "--input", input_path,
         "--output", RESULT_CSV,
-        "--params", params_path,
     ]
+    if params:
+        cmd.extend(["--params", params_path])
     stdout = rc.run_subprocess(cmd, RUN_LOG, SCRIPT_TIMEOUT_SECS, "sampler")
     return rc.fallback_result(RESULT_CSV, stdout, "sampler", RUN_LOG)
 
