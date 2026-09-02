@@ -54,10 +54,11 @@ def write_inputs(workdir, input_b64, params):
     return input_path, params_path
 
 
-def run_subprocess(cmd, log_path, timeout_secs, label):
+def run_subprocess(cmd, log_path, timeout_secs, label, env=None):
     """执行子进程，stdout+stderr 合并写入 log_path；超时抛 TimeoutError；rc!=0 抛 RuntimeError。
 
     返回子进程 stdout。执行日志（含 [label] 前缀）由调用方在异常路径上也已写入。
+    env 为可选环境变量覆盖（None 时继承父进程 env；jar-runner 用它注入 DS_* / SANDBOX_DB_PATH）。
     """
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
     with open(log_path, "w", encoding="utf-8") as log:
@@ -66,7 +67,7 @@ def run_subprocess(cmd, log_path, timeout_secs, label):
         try:
             proc = subprocess.run(cmd, stdout=subprocess.PIPE,
                                   stderr=subprocess.STDOUT, text=True,
-                                  timeout=timeout_secs)
+                                  timeout=timeout_secs, env=env)
         except subprocess.TimeoutExpired as exc:
             log.write("[%s] timed out after %ds\n" % (label, timeout_secs))
             log.write(exc.stdout or "")
@@ -75,7 +76,12 @@ def run_subprocess(cmd, log_path, timeout_secs, label):
         log.write(proc.stdout or "")
         log.flush()
         if proc.returncode != 0:
-            raise RuntimeError("%s failed rc=%d" % (label, proc.returncode))
+            # 带上脚本输出最后一行（通常是真实错误，如 ImportError: dependency not allowed: xxx），
+            # 使异常消息即平台 error_message 的来源"日志明确"。
+            tail = [ln.strip() for ln in (proc.stdout or "").splitlines() if ln.strip()]
+            detail = tail[-1] if tail else ""
+            raise RuntimeError("%s failed rc=%d%s" % (label, proc.returncode,
+                (": " + detail) if detail else ""))
         return proc.stdout or ""
 
 
@@ -90,8 +96,12 @@ def fallback_result(output_csv, stdout, label, log_path):
     return size
 
 
-def make_handler(result_csv, run_log):
-    """按结果/日志路径构建常驻结果服务 handler（GET /status /result /log）。"""
+def make_handler(result_csv, run_log, status="ok"):
+    """按结果/日志路径构建常驻结果服务 handler（GET /status /result /log）。
+
+    status 取值："ok"（脚本执行成功，/result 可读）或 "failed"（脚本执行失败，
+    容器保持常驻仅提供 /log 供平台取回，然后被 stopJob/deleteJob 终止）。
+    """
 
     class _Handler(BaseHTTPRequestHandler):
         def _send(self, body, ctype, code=200):  # noqa: N805
@@ -104,7 +114,7 @@ def make_handler(result_csv, run_log):
         def do_GET(self):  # noqa: N802
             path = self.path.split("?")[0]
             if path == "/status":
-                self._send(b"ok", "text/plain; charset=utf-8")
+                self._send(status.encode("utf-8"), "text/plain; charset=utf-8")
             elif path == "/result":
                 try:
                     with open(result_csv, "rb") as f:
@@ -126,7 +136,10 @@ def make_handler(result_csv, run_log):
     return _Handler
 
 
-def serve(port, result_csv, run_log):
-    """常驻 HTTP :port 提供 /status /result /log；容器跑完服务后由平台 stopJob/deleteJob 终止。"""
-    server = HTTPServer(("0.0.0.0", port), make_handler(result_csv, run_log))
+def serve(port, result_csv, run_log, status="ok"):
+    """常驻 HTTP :port 提供 /status /result /log；容器跑完服务后由平台 stopJob/deleteJob 终止。
+
+    status="failed"：脚本执行失败，容器保持常驻提供 /log（平台取回失败原因后 stopJob 终止）。
+    """
+    server = HTTPServer(("0.0.0.0", port), make_handler(result_csv, run_log, status))
     server.serve_forever()

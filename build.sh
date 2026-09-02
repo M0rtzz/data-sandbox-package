@@ -5,8 +5,8 @@
 set -euo pipefail
 PACKAGE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(cd "${PACKAGE_DIR}/.." && pwd)"
-BACKEND_DIR="${WORKSPACE_DIR}/secretpad"
-FRONTEND_DIR="${WORKSPACE_DIR}/secretpad-frontend"
+BACKEND_DIR="${WORKSPACE_DIR}/confidential-ai"
+FRONTEND_DIR="${WORKSPACE_DIR}/confidential-ai-frontend"
 REQUESTED_SECRETPAD_IMAGE="${SECRETPAD_IMAGE-}"
 source "${PACKAGE_DIR}/deploy/common/log.sh"
 source "${PACKAGE_DIR}/deploy/common/utils.sh"

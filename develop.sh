@@ -9,8 +9,8 @@ set -Eeuo pipefail
 
 PACKAGE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(cd "${PACKAGE_DIR}/.." && pwd)"
-BACKEND_DIR="$(realpath -m "${WORKSPACE_DIR}/secretpad")"
-FRONTEND_DIR="$(realpath -m "${WORKSPACE_DIR}/secretpad-frontend")"
+BACKEND_DIR="$(realpath -m "${WORKSPACE_DIR}/confidential-ai")"
+FRONTEND_DIR="$(realpath -m "${WORKSPACE_DIR}/confidential-ai-frontend")"
 
 # shellcheck source=deploy/common/log.sh
 source "${PACKAGE_DIR}/deploy/common/log.sh"
@@ -43,6 +43,11 @@ KUSCIA_IMAGE="${DATA_SANDBOX_DEV_KUSCIA_IMAGE:-secretflow-registry.cn-hangzhou.c
 MINIO_IMAGE="${DATA_SANDBOX_DEV_MINIO_IMAGE:-minio/minio:RELEASE.2025-04-22T22-12-26Z}"
 SAMPLER_IMAGE="${DATA_SANDBOX_DEV_SAMPLER_IMAGE:-data-sandbox-sampler:latest}"
 SAMPLER_DOCKER_DIR="${PACKAGE_DIR}/docker/data-sandbox-sampler"
+PYTHON_RUNNER_IMAGE="${DATA_SANDBOX_DEV_PYTHON_RUNNER_IMAGE:-data-sandbox-python-runner:v2-ml}"
+PYTHON_RUNNER_DOCKER_DIR="${PACKAGE_DIR}/docker/data-sandbox-python-runner"
+JAR_RUNNER_IMAGE="${DATA_SANDBOX_DEV_JAR_RUNNER_IMAGE:-data-sandbox-jar-runner:latest}"
+JAR_RUNNER_DOCKER_DIR="${PACKAGE_DIR}/docker/data-sandbox-jar-runner"
+JUPYTER_IMAGE="${DATA_SANDBOX_DEV_JUPYTER_IMAGE:-quay.io/jupyter/scipy-notebook:2024-10-07}"
 RUNNER_LIB_DIR="${PACKAGE_DIR}/docker/data-sandbox-runner-lib"
 
 usage() {
@@ -76,6 +81,9 @@ Environment overrides:
   DATA_SANDBOX_DEV_KUSCIA_IMAGE  Kuscia image used by the private stack.
   DATA_SANDBOX_DEV_MINIO_IMAGE   MinIO image used for private immutable assets.
   DATA_SANDBOX_DEV_SAMPLER_IMAGE Sampler image used by custom governance tasks.
+  DATA_SANDBOX_DEV_PYTHON_RUNNER_IMAGE Python model runner image.
+  DATA_SANDBOX_DEV_JAR_RUNNER_IMAGE    JAR model runner image.
+  DATA_SANDBOX_DEV_JUPYTER_IMAGE       Jupyter/SciPy sandbox image.
 
 The default `up` builds the current working tree, so developers can test before
 committing. `--pushed-only` enables the stricter commit-and-push check used for
@@ -537,6 +545,101 @@ ensure_sampler_runtime() {
   log_success "Sampler image and AppImages are ready in ${KUSCIA_CONTAINER}."
 }
 
+runner_source_hash() {
+  local docker_dir=$1
+  (
+    find "$docker_dir" -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum
+    sha256sum "${RUNNER_LIB_DIR}/runner_common.py"
+  ) | sha256sum | awk '{print $1}'
+}
+
+ensure_model_runner_runtime() {
+  local runtime_name=$1 image=$2 docker_dir=$3 register_script=$4 image_env=$5
+  shift 5
+  local required_file source_hash current_hash host_image_id image_tar container_image_tar appimage
+
+  for required_file in "$docker_dir/Dockerfile" "$docker_dir/start.sh" "${RUNNER_LIB_DIR}/runner_common.py"; do
+    [ -f "$required_file" ] || {
+      log_error "${runtime_name} build file is missing: ${required_file}"
+      exit 1
+    }
+  done
+  find "$docker_dir" -maxdepth 1 -type f -name '*.py' -print -quit | grep -q . || {
+    log_error "${runtime_name} source is missing from ${docker_dir}."
+    exit 1
+  }
+  [ -x "$register_script" ] || {
+    log_error "${runtime_name} AppImage registration script is missing or not executable: ${register_script}"
+    exit 1
+  }
+
+  source_hash="$(runner_source_hash "$docker_dir")"
+  current_hash="$(docker image inspect --format '{{index .Config.Labels \"io.hustnlp.data-sandbox.runner-source-sha256\"}}' \
+    "$image" 2>/dev/null || true)"
+  if [ "$current_hash" != "$source_hash" ]; then
+    log "Building ${runtime_name} image ${image}"
+    docker build \
+      --label "io.hustnlp.data-sandbox.runner-source-sha256=${source_hash}" \
+      -f "$docker_dir/Dockerfile" \
+      -t "$image" \
+      "${PACKAGE_DIR}/docker"
+  else
+    log "${runtime_name} image is current: ${image}"
+  fi
+
+  host_image_id="$(docker image inspect --format '{{.Id}}' "$image")"
+  if ! docker exec "$KUSCIA_CONTAINER" /home/kuscia/bin/crictl images -q 2>/dev/null | grep -Fxq "$host_image_id"; then
+    image_tar="$(mktemp "${KUSCIA_IMAGE_DIR}/data-sandbox-${runtime_name}.XXXXXX.tar")"
+    container_image_tar="/home/kuscia/var/images/$(basename "$image_tar")"
+    log "Importing ${runtime_name} image ${image} into ${KUSCIA_CONTAINER}"
+    docker save -o "$image_tar" "$image"
+    if ! docker exec "$KUSCIA_CONTAINER" /home/kuscia/bin/ctr \
+        --address /home/kuscia/containerd/run/containerd.sock \
+        -n k8s.io images import "$container_image_tar"; then
+      rm -f "$image_tar"
+      log_error "Failed to import ${runtime_name} image into ${KUSCIA_CONTAINER}."
+      exit 1
+    fi
+    rm -f "$image_tar"
+  fi
+  docker exec "$KUSCIA_CONTAINER" /home/kuscia/bin/crictl images -q 2>/dev/null | grep -Fxq "$host_image_id" || {
+    log_error "Imported ${runtime_name} image ID does not match the host image."
+    exit 1
+  }
+
+  env "${image_env}=${image}" "$register_script" "$KUSCIA_CONTAINER"
+  for appimage in "$@"; do
+    docker exec "$KUSCIA_CONTAINER" kubectl get appimage.kuscia.secretflow "$appimage" >/dev/null 2>&1 || {
+      log_error "${runtime_name} AppImage registration failed: ${appimage}"
+      exit 1
+    }
+  done
+  log_success "${runtime_name} image and AppImages are ready in ${KUSCIA_CONTAINER}."
+}
+
+ensure_jupyter_runtime() {
+  local host_image_id image_tar container_image_tar template rendered appimage
+  docker pull "$JUPYTER_IMAGE"
+  host_image_id="$(docker image inspect --format '{{.Id}}' "$JUPYTER_IMAGE")"
+  if ! docker exec "$KUSCIA_CONTAINER" /home/kuscia/bin/crictl images -q 2>/dev/null | grep -Fxq "$host_image_id"; then
+    image_tar="$(mktemp "${KUSCIA_IMAGE_DIR}/data-sandbox-jupyter.XXXXXX.tar")"
+    container_image_tar="/home/kuscia/var/images/$(basename "$image_tar")"
+    docker save -o "$image_tar" "$JUPYTER_IMAGE"
+    docker exec "$KUSCIA_CONTAINER" /home/kuscia/bin/ctr --address /home/kuscia/containerd/run/containerd.sock -n k8s.io images import "$container_image_tar"
+    rm -f "$image_tar"
+  fi
+  for template in data-sandbox-jupyter.yaml data-sandbox-jupyter-nonet.yaml; do
+    rendered="$(mktemp /tmp/data-sandbox-jupyter.rendered.XXXXXX)"
+    sed "s|{{.IMAGE_NAME}}|${JUPYTER_IMAGE%:*}|g; s|{{.IMAGE_TAG}}|${JUPYTER_IMAGE##*:}|g" "${BACKEND_DIR}/scripts/templates/${template}" > "$rendered"
+    docker cp "$rendered" "$KUSCIA_CONTAINER:/home/kuscia/${template}"
+    docker exec "$KUSCIA_CONTAINER" kubectl apply -f "/home/kuscia/${template}"
+    rm -f "$rendered"
+  done
+  for appimage in data-sandbox-jupyter data-sandbox-jupyter-nonet; do
+    docker exec "$KUSCIA_CONTAINER" kubectl get appimage.kuscia.secretflow "$appimage" >/dev/null
+  done
+}
+
 start_kuscia() {
   docker image inspect "$KUSCIA_IMAGE" >/dev/null 2>&1 || {
     log_error "Kuscia image is missing: ${KUSCIA_IMAGE}"
@@ -985,6 +1088,13 @@ case "$COMMAND" in
     ensure_network
     start_kuscia
     ensure_sampler_runtime
+    ensure_jupyter_runtime
+    ensure_model_runner_runtime "python-runner" "$PYTHON_RUNNER_IMAGE" "$PYTHON_RUNNER_DOCKER_DIR" \
+      "${BACKEND_DIR}/scripts/deploy/data-sandbox/register-data-sandbox-python-runner-appimages.sh" \
+      DATA_SANDBOX_PYTHON_RUNNER_IMAGE data-sandbox-python-runner data-sandbox-python-runner-nonet
+    ensure_model_runner_runtime "jar-runner" "$JAR_RUNNER_IMAGE" "$JAR_RUNNER_DOCKER_DIR" \
+      "${BACKEND_DIR}/scripts/deploy/data-sandbox/register-data-sandbox-jar-runner-appimages.sh" \
+      DATA_SANDBOX_JAR_RUNNER_IMAGE data-sandbox-jar-runner data-sandbox-jar-runner-nonet
     ensure_credentials
     start_minio
     initialize_secretpad_data
@@ -1014,6 +1124,13 @@ case "$COMMAND" in
     docker restart "$KUSCIA_CONTAINER" >/dev/null
     wait_for_kuscia_dev || { log_error "Private Kuscia did not become healthy."; exit 1; }
     ensure_sampler_runtime
+    ensure_jupyter_runtime
+    ensure_model_runner_runtime "python-runner" "$PYTHON_RUNNER_IMAGE" "$PYTHON_RUNNER_DOCKER_DIR" \
+      "${BACKEND_DIR}/scripts/deploy/data-sandbox/register-data-sandbox-python-runner-appimages.sh" \
+      DATA_SANDBOX_PYTHON_RUNNER_IMAGE data-sandbox-python-runner data-sandbox-python-runner-nonet
+    ensure_model_runner_runtime "jar-runner" "$JAR_RUNNER_IMAGE" "$JAR_RUNNER_DOCKER_DIR" \
+      "${BACKEND_DIR}/scripts/deploy/data-sandbox/register-data-sandbox-jar-runner-appimages.sh" \
+      DATA_SANDBOX_JAR_RUNNER_IMAGE data-sandbox-jar-runner data-sandbox-jar-runner-nonet
     docker restart "$MINIO_CONTAINER" >/dev/null
     docker restart "$SECRETPAD_CONTAINER" >/dev/null
     wait_for_secretpad "$CONSOLE_PORT" 180 || { log_error "Private SecretPad did not become healthy."; exit 1; }
