@@ -5,18 +5,31 @@
 set -euo pipefail
 PACKAGE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(cd "${PACKAGE_DIR}/.." && pwd)"
-BACKEND_DIR="${WORKSPACE_DIR}/secretpad"
-FRONTEND_DIR="${WORKSPACE_DIR}/secretpad-frontend"
 REQUESTED_SECRETPAD_IMAGE="${SECRETPAD_IMAGE-}"
+REQUESTED_CIPHERGPU_IMAGE="${CIPHERGPU_IMAGE-}"
 source "${PACKAGE_DIR}/deploy/common/log.sh"
 source "${PACKAGE_DIR}/deploy/common/utils.sh"
 load_env "${PACKAGE_DIR}"
 if [ -n "${REQUESTED_SECRETPAD_IMAGE}" ]; then
   SECRETPAD_IMAGE="${REQUESTED_SECRETPAD_IMAGE}"
 fi
+if [ -n "${REQUESTED_CIPHERGPU_IMAGE}" ]; then
+  CIPHERGPU_IMAGE="${REQUESTED_CIPHERGPU_IMAGE}"
+fi
 
 require_command docker
 require_command pnpm
+require_command realpath
+
+BACKEND_DIR="${DATA_SANDBOX_BACKEND_DIR:-${WORKSPACE_DIR}/confidential-ai}"
+FRONTEND_DIR="${DATA_SANDBOX_FRONTEND_DIR:-${WORKSPACE_DIR}/confidential-ai-frontend}"
+CIPHERGPU_DIR="${DATA_SANDBOX_CIPHERGPU_DIR:-${WORKSPACE_DIR}/../gpu/ciphergpu}"
+BACKEND_DIR="$(realpath -m "$BACKEND_DIR")"
+FRONTEND_DIR="$(realpath -m "$FRONTEND_DIR")"
+CIPHERGPU_DIR="$(realpath -m "$CIPHERGPU_DIR")"
+for source_dir in "$BACKEND_DIR" "$FRONTEND_DIR" "$CIPHERGPU_DIR"; do
+  [ -d "$source_dir" ] || { log_error "Required source checkout is missing: ${source_dir}"; exit 1; }
+done
 
 log "Building local SecretPad frontend"
 (
@@ -35,13 +48,21 @@ cp -a "${FRONTEND_DIR}/apps/platform/dist/." "$STATIC_DIR/"
 cp "${FRONTEND_DIR}/apps/platform/dist/index.html" "$TEMPLATE_INDEX"
 
 log "Building backend with Maven and Java 17"
-mkdir -p "${WORKSPACE_DIR}/.cache/m2"
+BUILD_UID="$(id -u)"
+BUILD_GID="$(id -g)"
+MAVEN_CACHE_DIR="${DATA_SANDBOX_MAVEN_CACHE_DIR:-${WORKSPACE_DIR}/.cache/m2-${BUILD_UID}}"
+mkdir -p "$MAVEN_CACHE_DIR"
 docker run --rm \
+  --user "${BUILD_UID}:${BUILD_GID}" \
+  -e HOME=/tmp/maven-home \
+  -e MAVEN_CONFIG=/tmp/maven-home/.m2 \
   -v "${BACKEND_DIR}:/workspace" \
-  -v "${WORKSPACE_DIR}/.cache/m2:/root/.m2" \
+  -v "${MAVEN_CACHE_DIR}:/tmp/maven-home/.m2" \
   -w /workspace \
   maven:3.9.9-eclipse-temurin-17-noble \
-  mvn clean -Dmaven.test.skip=true -Dfile.encoding=UTF-8 package
+  mvn -Duser.home=/tmp/maven-home \
+    -Dmaven.repo.local=/tmp/maven-home/.m2/repository \
+    clean -Dmaven.test.skip=true -Dfile.encoding=UTF-8 package
 
 mkdir -p "${PACKAGE_DIR}/artifacts" "${PACKAGE_DIR}/config/schema/center" "${PACKAGE_DIR}/config/schema/edge" "${PACKAGE_DIR}/config/schema/p2p"
 cp "${BACKEND_DIR}/target/secretpad.jar" "${PACKAGE_DIR}/artifacts/secretpad.jar"
@@ -63,4 +84,16 @@ if [ "${DATA_SANDBOX_DEV_IMAGE:-false}" = true ]; then
   docker_build_args+=(--build-arg "DEV_WORKSPACE=${DATA_SANDBOX_DEV_IMAGE_WORKSPACE:?Missing developer image workspace}")
 fi
 docker build "${docker_build_args[@]}" -t "${SECRETPAD_IMAGE:-data-sandbox-secretpad:mvp}" "$PACKAGE_DIR"
+
+ciphergpu_build_args=()
+if [ "${DATA_SANDBOX_DEV_IMAGE:-false}" = true ]; then
+  ciphergpu_build_args+=(--label "io.hustnlp.data-sandbox.dev=true")
+  ciphergpu_build_args+=(--label "io.hustnlp.data-sandbox.dev-owner=${DATA_SANDBOX_DEV_IMAGE_OWNER:?Missing developer image owner}")
+  ciphergpu_build_args+=(--label "io.hustnlp.data-sandbox.dev-workspace=${DATA_SANDBOX_DEV_IMAGE_WORKSPACE:?Missing developer image workspace}")
+fi
+log "Building CipherGPU A100 simulation image"
+docker build "${ciphergpu_build_args[@]}" \
+  -t "${CIPHERGPU_IMAGE:-data-sandbox-ciphergpu:a100-sim}" "$CIPHERGPU_DIR"
+
 log_success "Build complete: ${SECRETPAD_IMAGE:-data-sandbox-secretpad:mvp}"
+log_success "Build complete: ${CIPHERGPU_IMAGE:-data-sandbox-ciphergpu:a100-sim}"

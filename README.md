@@ -137,6 +137,40 @@ Use explicit ports when multiple private stacks share one Docker host:
 retains the private database and runtime data. Shared builds and deployments remain the sole
 responsibility of the designated release operator.
 
+## Local Hugging Face OpenAI API
+
+`serve-hf-model.sh` loads a local Hugging Face weight directory with vLLM and exposes the standard
+OpenAI `GET /v1/models` and `POST /v1/chat/completions` endpoints. The model directory must contain
+`config.json`; no model is downloaded by the script. The default directory is
+`/nas/Models/deepseek-llm-7b-chat`, and `--model` can override it.
+
+```bash
+./serve-hf-model.sh prepare
+
+./serve-hf-model.sh start \
+  --served-model-name deepseek-local \
+  --cuda-visible-devices 0 \
+  --host 0.0.0.0
+
+./serve-hf-model.sh status
+./serve-hf-model.sh test --message '用一句话介绍密态推理。'
+./serve-hf-model.sh logs
+./serve-hf-model.sh stop
+```
+
+To route local-weight deployments from the isolated CipherGPU stack to this runtime, recreate the
+developer containers with the internal host URL. Keep `/v1` in the value because CipherGPU appends
+`/chat/completions`:
+
+```bash
+export DATA_SANDBOX_DEV_VLLM_URL=http://host.docker.internal:39089/v1
+./develop.sh up --name confidential-mvp --branch feat/confidential-compute-mvp
+```
+
+The direct vLLM API should remain local or firewall-restricted. It does not replace the platform's
+authenticated and encrypted confidential-inference endpoint. Run `./serve-hf-model.sh --help` for
+multi-GPU, context length, quantization, chat-template, API-key, and advanced vLLM options.
+
 ## Operations
 
 ```bash

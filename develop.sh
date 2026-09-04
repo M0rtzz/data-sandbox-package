@@ -9,14 +9,17 @@ set -Eeuo pipefail
 
 PACKAGE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(cd "${PACKAGE_DIR}/.." && pwd)"
-BACKEND_DIR="$(realpath -m "${WORKSPACE_DIR}/secretpad")"
-FRONTEND_DIR="$(realpath -m "${WORKSPACE_DIR}/secretpad-frontend")"
 
 # shellcheck source=deploy/common/log.sh
 source "${PACKAGE_DIR}/deploy/common/log.sh"
 # shellcheck source=deploy/common/utils.sh
 source "${PACKAGE_DIR}/deploy/common/utils.sh"
 load_env "${PACKAGE_DIR}"
+
+BACKEND_DIR="$(realpath -m "${DATA_SANDBOX_BACKEND_DIR:-${WORKSPACE_DIR}/confidential-ai}")"
+FRONTEND_DIR="$(realpath -m "${DATA_SANDBOX_FRONTEND_DIR:-${WORKSPACE_DIR}/confidential-ai-frontend}")"
+CIPHERGPU_DIR="$(realpath -m "${DATA_SANDBOX_CIPHERGPU_DIR:-${WORKSPACE_DIR}/../gpu/ciphergpu}")"
+VLLM_URL="${DATA_SANDBOX_DEV_VLLM_URL:-}"
 
 case "${1:-help}" in
   -h|--help) COMMAND=help ;;
@@ -27,12 +30,12 @@ if [ "$#" -gt 0 ]; then
 fi
 
 DEV_NAME="${DATA_SANDBOX_DEV_NAME:-$(id -un)}"
-CONSOLE_PORT="${DATA_SANDBOX_DEV_PORT:-19088}"
-GATEWAY_PORT="${DATA_SANDBOX_DEV_GATEWAY_PORT:-19080}"
-API_HTTP_PORT="${DATA_SANDBOX_DEV_API_HTTP_PORT:-19082}"
-API_GRPC_PORT="${DATA_SANDBOX_DEV_API_GRPC_PORT:-19083}"
-INTERNAL_PORT="${DATA_SANDBOX_DEV_INTERNAL_PORT:-19081}"
-METRICS_PORT="${DATA_SANDBOX_DEV_METRICS_PORT:-19084}"
+CONSOLE_PORT="${DATA_SANDBOX_DEV_PORT:-39088}"
+GATEWAY_PORT="${DATA_SANDBOX_DEV_GATEWAY_PORT:-39080}"
+API_HTTP_PORT="${DATA_SANDBOX_DEV_API_HTTP_PORT:-39082}"
+API_GRPC_PORT="${DATA_SANDBOX_DEV_API_GRPC_PORT:-39083}"
+INTERNAL_PORT="${DATA_SANDBOX_DEV_INTERNAL_PORT:-39081}"
+METRICS_PORT="${DATA_SANDBOX_DEV_METRICS_PORT:-39084}"
 ADMIN_USER="${DATA_SANDBOX_DEV_ADMIN_USER:-devadmin}"
 ADVERTISE_HOST="${DATA_SANDBOX_DEV_ADVERTISE_HOST:-}"
 EXPECTED_BRANCH="${DATA_SANDBOX_DEV_BRANCH:-}"
@@ -53,22 +56,24 @@ Usage:
   ./develop.sh logs [options]
   ./develop.sh restart [options]
   ./develop.sh down [options]
+  ./develop.sh manifest [options]
 
 Options:
   --name NAME            Developer identifier. Default: current system user.
-  --port PORT            SecretPad console port. Default: 19088.
-  --gateway-port PORT    Kuscia gateway port. Default: 19080.
-  --api-http-port PORT   Kuscia HTTP API port. Default: 19082.
-  --api-grpc-port PORT   Kuscia gRPC API port. Default: 19083.
-  --internal-port PORT   Kuscia internal service port. Default: 19081.
-  --metrics-port PORT    Kuscia metrics port. Default: 19084.
+  --port PORT            SecretPad console port. Default: 39088.
+  --gateway-port PORT    Kuscia gateway port. Default: 39080.
+  --api-http-port PORT   Kuscia HTTP API port. Default: 39082.
+  --api-grpc-port PORT   Kuscia gRPC API port. Default: 39083.
+  --internal-port PORT   Kuscia internal service port. Default: 39081.
+  --metrics-port PORT    Kuscia metrics port. Default: 39084.
   --advertise-host HOST  Host that peers use to reach this instance's gateway.
                          Default: this machine's outbound IP address.
   --admin-user USER      SecretPad developer administrator. Default: devadmin.
-  --branch BRANCH        Required branch. Default: develop/<developer-name>.
+  --branch BRANCH        Required branch. Default: this package checkout's current branch.
   --skip-build           Reuse the existing developer image.
   --pushed-only          Require clean worktrees synchronized with upstream before building.
-  --component NAME       Log component: secretpad or kuscia.
+  --component NAME       Log component: secretpad, ciphergpu, sim-attestation,
+                         kuscia, or minio.
   -h, --help             Show this help.
 
 Environment overrides:
@@ -76,6 +81,10 @@ Environment overrides:
   DATA_SANDBOX_DEV_KUSCIA_IMAGE  Kuscia image used by the private stack.
   DATA_SANDBOX_DEV_MINIO_IMAGE   MinIO image used for private immutable assets.
   DATA_SANDBOX_DEV_SAMPLER_IMAGE Sampler image used by custom governance tasks.
+  DATA_SANDBOX_BACKEND_DIR       confidential-ai backend checkout.
+  DATA_SANDBOX_FRONTEND_DIR      confidential-ai-frontend checkout.
+  DATA_SANDBOX_CIPHERGPU_DIR     CipherGPU checkout (shared branch is supported).
+  DATA_SANDBOX_DEV_VLLM_URL      Optional private vLLM OpenAI endpoint for local weights.
 
 The default `up` builds the current working tree, so developers can test before
 committing. `--pushed-only` enables the stricter commit-and-push check used for
@@ -110,7 +119,7 @@ if [ "$COMMAND" = "help" ]; then
 fi
 
 case "$COMMAND" in
-  up|status|logs|restart|down) ;;
+  up|status|logs|restart|down|manifest) ;;
   *) log_error "Unknown command: ${COMMAND}"; usage; exit 1 ;;
 esac
 
@@ -131,7 +140,7 @@ for port in "$CONSOLE_PORT" "$GATEWAY_PORT" "$API_HTTP_PORT" "$API_GRPC_PORT" "$
 done
 
 if [ -z "$EXPECTED_BRANCH" ]; then
-  EXPECTED_BRANCH="develop/${DEV_NAME}"
+  EXPECTED_BRANCH="$(git -C "$PACKAGE_DIR" branch --show-current)"
 fi
 
 DEV_ROOT="${DATA_SANDBOX_DEV_ROOT:-${WORKSPACE_DIR}/.dev-runtime/${DEV_NAME}}"
@@ -140,8 +149,11 @@ DEV_PREFIX="data-sandbox-dev-${DEV_NAME}"
 KUSCIA_CONTAINER="${DEV_PREFIX}-kuscia"
 SECRETPAD_CONTAINER="${DEV_PREFIX}-secretpad"
 MINIO_CONTAINER="${DEV_PREFIX}-minio"
+CIPHERGPU_CONTAINER="${DEV_PREFIX}-ciphergpu"
+SIM_ATTESTATION_CONTAINER="${DEV_PREFIX}-sim-attestation"
 DEV_NETWORK="${DEV_PREFIX}"
 SECRETPAD_IMAGE="data-sandbox-secretpad:dev-${DEV_NAME}"
+CIPHERGPU_IMAGE="${DATA_SANDBOX_DEV_CIPHERGPU_IMAGE:-data-sandbox-ciphergpu:dev-${DEV_NAME}}"
 DOMAIN_ID="dev-${DEV_NAME}"
 
 KUSCIA_ROOT="${DEV_ROOT}/kuscia"
@@ -157,6 +169,13 @@ SECRETPAD_DB_DIR="${SECRETPAD_ROOT}/db"
 SECRETPAD_DATA_DIR="${SECRETPAD_ROOT}/data"
 SECRETPAD_LOG_DIR="${SECRETPAD_ROOT}/log"
 MINIO_DATA_DIR="${DEV_ROOT}/minio"
+CONFIDENTIAL_ROOT="${DEV_ROOT}/confidential-compute"
+CONFIDENTIAL_CA_DIR="${CONFIDENTIAL_ROOT}/ca"
+CIPHERGPU_SERVER_CERT_DIR="${CONFIDENTIAL_ROOT}/ciphergpu-server"
+SIM_ATTESTATION_SERVER_CERT_DIR="${CONFIDENTIAL_ROOT}/sim-attestation-server"
+SECRETPAD_CIPHERGPU_CLIENT_DIR="${CONFIDENTIAL_ROOT}/secretpad-client"
+CIPHERGPU_SIM_CLIENT_DIR="${CONFIDENTIAL_ROOT}/ciphergpu-client"
+SIM_ATTESTATION_SECRET_DIR="${CONFIDENTIAL_ROOT}/sim-attestation-secret"
 SNAPSHOT_DIR="${DEV_ROOT}/snapshots"
 BACKUP_DIR="${DEV_ROOT}/backups"
 CREDENTIAL_FILE="${DEV_ROOT}/secretpad.env"
@@ -165,6 +184,12 @@ MANIFEST_FILE="${DEV_ROOT}/build-manifest.txt"
 owner_label="io.hustnlp.data-sandbox.dev-owner"
 workspace_label="io.hustnlp.data-sandbox.dev-workspace"
 managed_label="io.hustnlp.data-sandbox.dev"
+
+git_repo() {
+  local repository=$1
+  shift
+  git -c "safe.directory=${repository}" -C "$repository" "$@"
+}
 
 reject_foreign_paths() {
   case "$DEV_ROOT" in
@@ -192,16 +217,20 @@ require_personal_checkout() {
       exit 1
     }
   done
+  [ -r "${CIPHERGPU_DIR}/Dockerfile" ] || {
+    log_error "CipherGPU checkout is missing or unreadable: ${CIPHERGPU_DIR}"
+    exit 1
+  }
 }
 
 verify_checkout() {
   local repository=$1
   local branch
-  git -C "$repository" rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
+  git_repo "$repository" rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
     log_error "Not a Git repository: ${repository}"
     exit 1
   }
-  branch="$(git -C "$repository" branch --show-current)"
+  branch="$(git_repo "$repository" branch --show-current)"
   [ "$branch" = "$EXPECTED_BRANCH" ] || {
     log_error "${repository} is on ${branch:-detached HEAD}; expected ${EXPECTED_BRANCH}."
     exit 1
@@ -209,20 +238,20 @@ verify_checkout() {
   if [ "$REQUIRE_PUSHED" = false ]; then
     return 0
   fi
-  [ -z "$(git -C "$repository" status --porcelain)" ] || {
+  [ -z "$(git_repo "$repository" status --porcelain)" ] || {
     log_error "Uncommitted or untracked files exist in ${repository}. Commit and push them first."
     exit 1
   }
   local upstream counts
-  upstream="$(git -C "$repository" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)" || {
+  upstream="$(git_repo "$repository" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)" || {
     log_error "${repository} has no upstream branch. Push ${EXPECTED_BRANCH} first."
     exit 1
   }
-  git -C "$repository" fetch --quiet || {
+  git_repo "$repository" fetch --quiet || {
     log_error "Cannot refresh the remote state for ${repository}. Check Git access."
     exit 1
   }
-  counts="$(git -C "$repository" rev-list --left-right --count "${upstream}...HEAD")"
+  counts="$(git_repo "$repository" rev-list --left-right --count "${upstream}...HEAD")"
   [ "$counts" = $'0\t0' ] || {
     log_error "${repository} differs from ${upstream} (${counts}). Pull or push before building."
     exit 1
@@ -389,6 +418,9 @@ ensure_runtime_directories() {
   mkdir -p "$KUSCIA_IMAGE_DIR" "$KUSCIA_K3S_DIR" "$KUSCIA_CONTAINERD_DIR"
   mkdir -p "$SECRETPAD_ROOT" "$SECRETPAD_DB_DIR" "$SECRETPAD_DATA_DIR" "$SECRETPAD_LOG_DIR"
   mkdir -p "$MINIO_DATA_DIR" "$SNAPSHOT_DIR" "$BACKUP_DIR"
+  mkdir -p "$CONFIDENTIAL_CA_DIR" "$CIPHERGPU_SERVER_CERT_DIR"
+  mkdir -p "$SIM_ATTESTATION_SERVER_CERT_DIR" "$SECRETPAD_CIPHERGPU_CLIENT_DIR"
+  mkdir -p "$CIPHERGPU_SIM_CLIENT_DIR" "$SIM_ATTESTATION_SECRET_DIR"
   chmod 700 "$DEV_ROOT"
 }
 
@@ -396,12 +428,18 @@ build_developer_image() {
   local generated_template="${BACKEND_DIR}/secretpad-web/src/main/resources/templates/index.html"
   local template_backup="${DEV_ROOT}/.build-template-backup"
   local template_exists=false
-  local backend_status_before frontend_status_before backend_status_after frontend_status_after
+  local backend_status_before frontend_status_before ciphergpu_status_before
+  local backend_status_after frontend_status_after ciphergpu_status_after
   verify_checkout "$BACKEND_DIR"
   verify_checkout "$FRONTEND_DIR"
+  verify_checkout "$CIPHERGPU_DIR"
   if [ "$SKIP_BUILD" = true ]; then
     verify_managed_image "$SECRETPAD_IMAGE" || {
       log_error "Developer image not found: ${SECRETPAD_IMAGE}. Run up without --skip-build."
+      exit 1
+    }
+    verify_managed_image "$CIPHERGPU_IMAGE" || {
+      log_error "Developer image not found: ${CIPHERGPU_IMAGE}. Run up without --skip-build."
       exit 1
     }
     return
@@ -411,8 +449,9 @@ build_developer_image() {
   else
     log "Building developer image ${SECRETPAD_IMAGE} from the current working tree"
   fi
-  backend_status_before="$(git -C "$BACKEND_DIR" status --porcelain)"
-  frontend_status_before="$(git -C "$FRONTEND_DIR" status --porcelain)"
+  backend_status_before="$(git_repo "$BACKEND_DIR" status --porcelain)"
+  frontend_status_before="$(git_repo "$FRONTEND_DIR" status --porcelain)"
+  ciphergpu_status_before="$(git_repo "$CIPHERGPU_DIR" status --porcelain)"
   if [ -e "$generated_template" ]; then
     cp -a "$generated_template" "$template_backup"
     template_exists=true
@@ -421,6 +460,10 @@ build_developer_image() {
       DATA_SANDBOX_DEV_IMAGE_OWNER="$(id -un)" \
       DATA_SANDBOX_DEV_IMAGE_WORKSPACE="$WORKSPACE_DIR" \
       SECRETPAD_IMAGE="$SECRETPAD_IMAGE" \
+      CIPHERGPU_IMAGE="$CIPHERGPU_IMAGE" \
+      DATA_SANDBOX_BACKEND_DIR="$BACKEND_DIR" \
+      DATA_SANDBOX_FRONTEND_DIR="$FRONTEND_DIR" \
+      DATA_SANDBOX_CIPHERGPU_DIR="$CIPHERGPU_DIR" \
       "${PACKAGE_DIR}/build.sh"; then
     if [ "$template_exists" = true ]; then
       cp -a "$template_backup" "$generated_template"
@@ -437,8 +480,9 @@ build_developer_image() {
     rm -f "$generated_template"
   fi
   rm -f "$template_backup"
-  backend_status_after="$(git -C "$BACKEND_DIR" status --porcelain)"
-  frontend_status_after="$(git -C "$FRONTEND_DIR" status --porcelain)"
+  backend_status_after="$(git_repo "$BACKEND_DIR" status --porcelain)"
+  frontend_status_after="$(git_repo "$FRONTEND_DIR" status --porcelain)"
+  ciphergpu_status_after="$(git_repo "$CIPHERGPU_DIR" status --porcelain)"
   [ "$backend_status_before" = "$backend_status_after" ] || {
     log_error "The build changed source files in ${BACKEND_DIR}."
     exit 1
@@ -447,7 +491,12 @@ build_developer_image() {
     log_error "The build changed source files in ${FRONTEND_DIR}."
     exit 1
   }
+  [ "$ciphergpu_status_before" = "$ciphergpu_status_after" ] || {
+    log_error "The build changed source files in ${CIPHERGPU_DIR}."
+    exit 1
+  }
   verify_managed_image "$SECRETPAD_IMAGE"
+  verify_managed_image "$CIPHERGPU_IMAGE"
 }
 
 sampler_source_hash() {
@@ -708,6 +757,235 @@ credential_value() {
   sed -n "s/^${key}=//p" "$CREDENTIAL_FILE" | head -n 1
 }
 
+set_credential() {
+  local key=$1 value=$2
+  if grep -q "^${key}=" "$CREDENTIAL_FILE"; then
+    sed -i "s|^${key}=.*|${key}=${value}|" "$CREDENTIAL_FILE"
+  else
+    printf '%s=%s\n' "$key" "$value" >>"$CREDENTIAL_FILE"
+  fi
+}
+
+generate_confidential_leaf_certificate() {
+  local destination=$1 common_name=$2 usage=$3 subject_alt_name=$4
+  local key_name=$5 cert_name=$6
+  local key_file="${destination}/${key_name}"
+  local cert_file="${destination}/${cert_name}"
+  local request_file="${destination}/request.csr"
+  local extensions_file="${destination}/extensions.cnf"
+  if [ -s "$key_file" ] && [ -s "$cert_file" ] && [ -s "${destination}/ca.crt" ] \
+      && cmp -s "${CONFIDENTIAL_CA_DIR}/ca.crt" "${destination}/ca.crt" \
+      && openssl x509 -checkend 86400 -noout -in "$cert_file" >/dev/null 2>&1 \
+      && openssl verify -CAfile "${CONFIDENTIAL_CA_DIR}/ca.crt" "$cert_file" >/dev/null 2>&1; then
+    chmod 444 "$key_file" "$cert_file" "${destination}/ca.crt"
+    return
+  fi
+  openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out "$key_file"
+  openssl req -new -key "$key_file" -out "$request_file" -subj "/CN=${common_name}"
+  {
+    printf 'basicConstraints=critical,CA:FALSE\n'
+    printf 'keyUsage=critical,digitalSignature,keyEncipherment\n'
+    printf 'extendedKeyUsage=%s\n' "$usage"
+    printf 'subjectAltName=%s\n' "$subject_alt_name"
+  } >"$extensions_file"
+  openssl x509 -req -in "$request_file" \
+    -CA "${CONFIDENTIAL_CA_DIR}/ca.crt" -CAkey "${CONFIDENTIAL_CA_DIR}/ca.key" \
+    -CAcreateserial -days 30 -sha256 -extfile "$extensions_file" -out "$cert_file"
+  cp "${CONFIDENTIAL_CA_DIR}/ca.crt" "${destination}/ca.crt"
+  rm -f "$request_file" "$extensions_file"
+  # DEV_ROOT is 0700 and mounts are read-only. World-readable file mode here
+  # means only that the fixed container UID 10001 can read through the mount.
+  chmod 444 "$key_file" "$cert_file" "${destination}/ca.crt"
+}
+
+ensure_confidential_credentials() {
+  umask 077
+  if [ ! -s "${CONFIDENTIAL_CA_DIR}/ca.key" ] || [ ! -s "${CONFIDENTIAL_CA_DIR}/ca.crt" ] \
+      || ! openssl x509 -checkend 86400 -noout -in "${CONFIDENTIAL_CA_DIR}/ca.crt" >/dev/null 2>&1; then
+    log "Generating an isolated A100 simulation mTLS root"
+    openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 \
+      -out "${CONFIDENTIAL_CA_DIR}/ca.key"
+    openssl req -x509 -new -key "${CONFIDENTIAL_CA_DIR}/ca.key" -days 30 -sha256 \
+      -subj "/CN=${DEV_PREFIX}-a100-sim-test-root" \
+      -addext 'basicConstraints=critical,CA:TRUE' \
+      -addext 'keyUsage=critical,keyCertSign,cRLSign' \
+      -out "${CONFIDENTIAL_CA_DIR}/ca.crt"
+    chmod 400 "${CONFIDENTIAL_CA_DIR}/ca.key"
+    chmod 444 "${CONFIDENTIAL_CA_DIR}/ca.crt"
+  fi
+
+  generate_confidential_leaf_certificate "$CIPHERGPU_SERVER_CERT_DIR" \
+    "$CIPHERGPU_CONTAINER" serverAuth "DNS:${CIPHERGPU_CONTAINER}" server.key server.crt
+  generate_confidential_leaf_certificate "$SIM_ATTESTATION_SERVER_CERT_DIR" \
+    "$SIM_ATTESTATION_CONTAINER" serverAuth "DNS:${SIM_ATTESTATION_CONTAINER}" server.key server.crt
+  generate_confidential_leaf_certificate "$SECRETPAD_CIPHERGPU_CLIENT_DIR" \
+    "${DEV_PREFIX}-secretpad-control-plane" clientAuth \
+    "DNS:${DEV_PREFIX}-secretpad-control-plane" client.key client.crt
+  generate_confidential_leaf_certificate "$CIPHERGPU_SIM_CLIENT_DIR" \
+    "${DEV_PREFIX}-ciphergpu-agent" clientAuth \
+    "DNS:${DEV_PREFIX}-ciphergpu-agent" client.key client.crt
+
+  local signing_key="${SIM_ATTESTATION_SECRET_DIR}/sak.key"
+  local public_key_file="${SIM_ATTESTATION_SECRET_DIR}/sak.public"
+  if [ ! -s "$signing_key" ]; then
+    log "Generating a simulation-only Ed25519 evidence signing key"
+    openssl rand -out "$signing_key" 32
+  fi
+  chmod 444 "$signing_key"
+  if [ ! -s "$public_key_file" ]; then
+    docker run --rm \
+      -v "${SIM_ATTESTATION_SECRET_DIR}:/run/secrets:ro" \
+      --entrypoint python "$CIPHERGPU_IMAGE" -c \
+      'from ciphergpu.crypto import EvidenceSigner; print(EvidenceSigner.load("/run/secrets/sak.key").public_key)' \
+      >"$public_key_file"
+    chmod 444 "$public_key_file"
+  fi
+
+  local tls_public_key_hash
+  tls_public_key_hash="sha256:$(openssl x509 -in "${CIPHERGPU_SERVER_CERT_DIR}/server.crt" \
+    -pubkey -noout | openssl pkey -pubin -outform DER | sha256sum | awk '{print $1}')"
+  set_credential CIPHERGPU_URL "https://${CIPHERGPU_CONTAINER}:9000"
+  set_credential CIPHERGPU_CLIENT_CERT_DIR /app/ciphergpu-client
+  set_credential CIPHERGPU_ALLOW_INSECURE_HTTP false
+  set_credential CIPHERGPU_SIM_ROOT_PUBLIC_KEY "$(tr -d '\r\n' <"$public_key_file")"
+  set_credential CIPHERGPU_WORKLOAD_DIGEST sha256:builtin-digest-v1
+  set_credential CIPHERGPU_POLICY_DIGEST sha256:a100-sim-policy-v1
+  set_credential CIPHERGPU_TLS_PUBLIC_KEY_HASH "$tls_public_key_hash"
+  set_credential CONFIDENTIAL_COMPUTE_SECURITY_PROFILE a100-sim
+  chmod 600 "$CREDENTIAL_FILE"
+}
+
+wait_for_confidential_service() {
+  local url=$1 client_cert_dir=$2
+  docker run --rm --network "$DEV_NETWORK" \
+    -e "HEALTH_URL=${url}/v1/health" \
+    -v "${client_cert_dir}:/run/client:ro" \
+    --entrypoint python "$CIPHERGPU_IMAGE" -c '
+import os
+import ssl
+import time
+import httpx
+
+tls = ssl.create_default_context(cafile="/run/client/ca.crt")
+tls.load_cert_chain("/run/client/client.crt", "/run/client/client.key")
+for _ in range(60):
+    try:
+        with httpx.Client(
+            verify=tls,
+            timeout=2,
+            trust_env=False,
+        ) as client:
+            response = client.get(os.environ["HEALTH_URL"])
+        body = response.json()
+        if response.status_code == 200 and body.get("securityProfile") == "a100-sim" and body.get("simulated") is True:
+            raise SystemExit(0)
+    except Exception:
+        pass
+    time.sleep(1)
+raise SystemExit(1)
+' >/dev/null 2>&1
+}
+
+start_sim_attestation() {
+  if verify_managed_container "$SIM_ATTESTATION_CONTAINER"; then
+    docker rm -f "$SIM_ATTESTATION_CONTAINER" >/dev/null
+  fi
+  log "Starting explicit A100 simulation attestation service ${SIM_ATTESTATION_CONTAINER}"
+  docker run -d --init --restart unless-stopped --read-only \
+    --name "$SIM_ATTESTATION_CONTAINER" --network "$DEV_NETWORK" \
+    --cap-drop ALL --security-opt no-new-privileges \
+    --pids-limit 128 --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+    --label "${managed_label}=true" \
+    --label "${owner_label}=$(id -un)" \
+    --label "${workspace_label}=${WORKSPACE_DIR}" \
+    -e SIM_ATTESTATION_SIGNING_KEY=/run/secrets/sak.key \
+    -v "${SIM_ATTESTATION_SECRET_DIR}:/run/secrets:ro" \
+    -v "${SIM_ATTESTATION_SERVER_CERT_DIR}:/run/tls:ro" \
+    --entrypoint python "$CIPHERGPU_IMAGE" -m uvicorn ciphergpu.sim_attestation:app \
+      --host 0.0.0.0 --port 9100 --no-access-log \
+      --ssl-keyfile /run/tls/server.key --ssl-certfile /run/tls/server.crt \
+      --ssl-ca-certs /run/tls/ca.crt --ssl-cert-reqs 2 >/dev/null
+  wait_for_confidential_service "https://${SIM_ATTESTATION_CONTAINER}:9100" \
+    "$CIPHERGPU_SIM_CLIENT_DIR" || {
+    log_error "A100 simulation attestation service did not become healthy."
+    exit 1
+  }
+}
+
+start_ciphergpu() {
+  if verify_managed_container "$CIPHERGPU_CONTAINER"; then
+    docker rm -f "$CIPHERGPU_CONTAINER" >/dev/null
+  fi
+  local gpu_args=()
+  local model_runtime_args=()
+  if [ "${DATA_SANDBOX_DEV_CIPHERGPU_GPUS:-all}" != none ]; then
+    gpu_args+=(--gpus "${DATA_SANDBOX_DEV_CIPHERGPU_GPUS:-all}")
+  fi
+  if [ -n "$VLLM_URL" ]; then
+    model_runtime_args+=(-e "CIPHERGPU_VLLM_URL=${VLLM_URL}")
+  fi
+  log "Starting CipherGPU A100 simulation agent ${CIPHERGPU_CONTAINER}"
+  docker run -d --init --restart unless-stopped --read-only \
+    --name "$CIPHERGPU_CONTAINER" --network "$DEV_NETWORK" \
+    --add-host host.docker.internal:host-gateway \
+    --cap-drop ALL --security-opt no-new-privileges \
+    --pids-limit 256 --tmpfs /tmp:rw,noexec,nosuid,size=32m \
+    "${gpu_args[@]}" \
+    --label "${managed_label}=true" \
+    --label "${owner_label}=$(id -un)" \
+    --label "${workspace_label}=${WORKSPACE_DIR}" \
+    -e CIPHERGPU_TLS_KEY=/run/tls/server.key \
+    -e CIPHERGPU_TLS_CERT=/run/tls/server.crt \
+    -e CIPHERGPU_TLS_CA=/run/tls/ca.crt \
+    -e "CIPHERGPU_TLS_PUBLIC_KEY_HASH=$(credential_value CIPHERGPU_TLS_PUBLIC_KEY_HASH)" \
+    -e CIPHERGPU_WORKLOAD_DIGEST=sha256:builtin-digest-v1 \
+    -e CIPHERGPU_POLICY_DIGEST=sha256:a100-sim-policy-v1 \
+    -e "SIM_ATTESTATION_URL=https://${SIM_ATTESTATION_CONTAINER}:9100" \
+    -e SIM_ATTESTATION_CA=/run/sim-client/ca.crt \
+    -e SIM_ATTESTATION_CLIENT_CERT=/run/sim-client/client.crt \
+    -e SIM_ATTESTATION_CLIENT_KEY=/run/sim-client/client.key \
+    "${model_runtime_args[@]}" \
+    -v "${CIPHERGPU_SERVER_CERT_DIR}:/run/tls:ro" \
+    -v "${CIPHERGPU_SIM_CLIENT_DIR}:/run/sim-client:ro" \
+    "$CIPHERGPU_IMAGE" >/dev/null
+  wait_for_confidential_service "https://${CIPHERGPU_CONTAINER}:9000" \
+    "$SECRETPAD_CIPHERGPU_CLIENT_DIR" || {
+    log_error "CipherGPU A100 simulation agent did not become healthy."
+    exit 1
+  }
+  verify_ciphergpu_capabilities
+}
+
+verify_ciphergpu_capabilities() {
+  docker run --rm --network "$DEV_NETWORK" \
+    -e "CAPABILITIES_URL=https://${CIPHERGPU_CONTAINER}:9000/v1/crypto/capabilities" \
+    -v "${SECRETPAD_CIPHERGPU_CLIENT_DIR}:/run/client:ro" \
+    --entrypoint python "$CIPHERGPU_IMAGE" -c '
+import os
+import ssl
+import httpx
+
+tls = ssl.create_default_context(cafile="/run/client/ca.crt")
+tls.load_cert_chain("/run/client/client.crt", "/run/client/client.key")
+with httpx.Client(verify=tls, timeout=5, trust_env=False) as client:
+    response = client.get(os.environ["CAPABILITIES_URL"])
+    response.raise_for_status()
+    body = response.json()
+algorithms = body.get("contentEncryptionAlgorithms", [])
+names = {item.get("algorithm") for item in algorithms}
+required = {
+    "AES-256-GCM", "AES-256-GCM-SIV", "CHACHA20-POLY1305",
+    "XCHACHA20-POLY1305", "AES-256-SIV",
+}
+if body.get("format") != "ds-envelope/v2" or names != required:
+    raise SystemExit("CipherGPU content-encryption capability mismatch")
+' >/dev/null || {
+    log_error "CipherGPU did not publish the required five ds-envelope/v2 algorithms."
+    exit 1
+  }
+  log_success "CipherGPU ds-envelope/v2 five-algorithm capability check passed."
+}
+
 start_minio() {
   if verify_managed_container "$MINIO_CONTAINER"; then
     docker rm -f "$MINIO_CONTAINER" >/dev/null
@@ -781,7 +1059,7 @@ initialize_secretpad_data() {
       sed -i '/^    out-of-order: true/a\    validate-on-migrate: false\n    ignore-migration-patterns:\n      - '\''*:missing'\''' "$config_file"
     fi
   done
-  local profile version
+  local profile
   for profile in center edge p2p; do
     mkdir -p "${SECRETPAD_CONFIG_DIR}/schema/${profile}"
     # Remove migrations from older builds before copying the current chain;
@@ -887,6 +1165,7 @@ start_secretpad() {
     -v "${SECRETPAD_DB_DIR}:/app/db" \
     -v "${SECRETPAD_DATA_DIR}:/app/data" \
     -v "${SECRETPAD_LOG_DIR}:/app/log" \
+    -v "${SECRETPAD_CIPHERGPU_CLIENT_DIR}:/app/ciphergpu-client:ro" \
     -v "${SNAPSHOT_DIR}:/app/dev-data/snapshots" \
     -v "${BACKUP_DIR}:/app/dev-data/backups" \
     "$SECRETPAD_IMAGE" >/dev/null
@@ -922,10 +1201,12 @@ start_secretpad() {
 }
 
 write_manifest() {
-  local backend_sha frontend_sha image_id sampler_image_id
-  backend_sha="$(git -C "$BACKEND_DIR" rev-parse HEAD)"
-  frontend_sha="$(git -C "$FRONTEND_DIR" rev-parse HEAD)"
+  local backend_sha frontend_sha ciphergpu_sha image_id ciphergpu_image_id sampler_image_id
+  backend_sha="$(git_repo "$BACKEND_DIR" rev-parse --verify HEAD 2>/dev/null || printf 'initial-uncommitted-tree')"
+  frontend_sha="$(git_repo "$FRONTEND_DIR" rev-parse --verify HEAD 2>/dev/null || printf 'initial-uncommitted-tree')"
+  ciphergpu_sha="$(git_repo "$CIPHERGPU_DIR" rev-parse --verify HEAD 2>/dev/null || printf 'initial-uncommitted-tree')"
   image_id="$(docker image inspect --format '{{.Id}}' "$SECRETPAD_IMAGE")"
+  ciphergpu_image_id="$(docker image inspect --format '{{.Id}}' "$CIPHERGPU_IMAGE")"
   sampler_image_id="$(docker image inspect --format '{{.Id}}' "$SAMPLER_IMAGE")"
   umask 077
   {
@@ -934,8 +1215,17 @@ write_manifest() {
     printf 'workspace=%s\n' "$WORKSPACE_DIR"
     printf 'secretpad_commit=%s\n' "$backend_sha"
     printf 'secretpad_frontend_commit=%s\n' "$frontend_sha"
+    printf 'ciphergpu_commit=%s\n' "$ciphergpu_sha"
     printf 'secretpad_image=%s\n' "$SECRETPAD_IMAGE"
     printf 'secretpad_image_id=%s\n' "$image_id"
+    printf 'ciphergpu_image=%s\n' "$CIPHERGPU_IMAGE"
+    printf 'ciphergpu_image_id=%s\n' "$ciphergpu_image_id"
+    printf 'security_profile=a100-sim\n'
+    printf 'attestation_verified=false\n'
+    printf 'simulated=true\n'
+    printf 'hardware_model=NVIDIA A100\n'
+    printf 'simulation_root_public_key=%s\n' "$(credential_value CIPHERGPU_SIM_ROOT_PUBLIC_KEY)"
+    printf 'ciphergpu_tls_public_key_hash=%s\n' "$(credential_value CIPHERGPU_TLS_PUBLIC_KEY_HASH)"
     printf 'sampler_image=%s\n' "$SAMPLER_IMAGE"
     printf 'sampler_image_id=%s\n' "$sampler_image_id"
     if [ "$REQUIRE_PUSHED" = true ]; then
@@ -954,8 +1244,11 @@ show_status() {
   printf 'Workspace: %s\n' "$WORKSPACE_DIR"
   printf 'Runtime:   %s\n' "$DEV_ROOT"
   printf 'Console:   http://127.0.0.1:%s/edge?tab=sandbox-manager\n' "$CONSOLE_PORT"
+  printf 'A100 UI:   http://127.0.0.1:%s/confidential-compute\n' "$CONSOLE_PORT"
+  printf 'Security:  a100-sim (simulated=true, attestationVerified=false)\n'
   printf '\nContainers:\n'
-  for container in "$KUSCIA_CONTAINER" "$MINIO_CONTAINER" "$SECRETPAD_CONTAINER"; do
+  for container in "$KUSCIA_CONTAINER" "$MINIO_CONTAINER" "$SIM_ATTESTATION_CONTAINER" \
+      "$CIPHERGPU_CONTAINER" "$SECRETPAD_CONTAINER"; do
     if verify_managed_container "$container"; then
       docker inspect --format '  {{.Name}}: {{.State.Status}} ({{.Config.Image}})' "$container"
     else
@@ -986,11 +1279,20 @@ case "$COMMAND" in
     start_kuscia
     ensure_sampler_runtime
     ensure_credentials
+    ensure_confidential_credentials
     start_minio
     initialize_secretpad_data
+    start_sim_attestation
+    start_ciphergpu
     start_secretpad
     write_manifest
     log_success "Private developer system is ready at http://127.0.0.1:${CONSOLE_PORT}/edge?tab=sandbox-manager"
+    log "A100 simulation console: http://127.0.0.1:${CONSOLE_PORT}/confidential-compute"
+    if [ -n "$VLLM_URL" ]; then
+      log "Local-weight inference runtime: ${VLLM_URL}"
+    else
+      log "Local weights can be imported and reviewed; set DATA_SANDBOX_DEV_VLLM_URL to enable vLLM routing."
+    fi
     log "Administrator: ${ADMIN_USER}"
     ;;
   status)
@@ -999,9 +1301,11 @@ case "$COMMAND" in
   logs)
     case "$LOG_COMPONENT" in
       secretpad) target="$SECRETPAD_CONTAINER" ;;
+      ciphergpu) target="$CIPHERGPU_CONTAINER" ;;
+      sim-attestation) target="$SIM_ATTESTATION_CONTAINER" ;;
       kuscia) target="$KUSCIA_CONTAINER" ;;
       minio) target="$MINIO_CONTAINER" ;;
-      *) log_error "Log component must be secretpad, kuscia, or minio."; exit 1 ;;
+      *) log_error "Log component must be secretpad, ciphergpu, sim-attestation, kuscia, or minio."; exit 1 ;;
     esac
     verify_managed_container "$target" || { log_error "Container not found: ${target}"; exit 1; }
     exec docker logs --tail 300 -f "$target"
@@ -1010,10 +1314,15 @@ case "$COMMAND" in
     check_host_inotify_limits
     verify_managed_container "$KUSCIA_CONTAINER" || { log_error "Private Kuscia is not created."; exit 1; }
     verify_managed_container "$MINIO_CONTAINER" || { log_error "Private MinIO is not created."; exit 1; }
+    verify_managed_container "$SIM_ATTESTATION_CONTAINER" || { log_error "Simulation verifier is not created."; exit 1; }
+    verify_managed_container "$CIPHERGPU_CONTAINER" || { log_error "CipherGPU is not created."; exit 1; }
     verify_managed_container "$SECRETPAD_CONTAINER" || { log_error "Private SecretPad is not created."; exit 1; }
     docker restart "$KUSCIA_CONTAINER" >/dev/null
     wait_for_kuscia_dev || { log_error "Private Kuscia did not become healthy."; exit 1; }
     ensure_sampler_runtime
+    ensure_confidential_credentials
+    start_sim_attestation
+    start_ciphergpu
     docker restart "$MINIO_CONTAINER" >/dev/null
     docker restart "$SECRETPAD_CONTAINER" >/dev/null
     wait_for_secretpad "$CONSOLE_PORT" 180 || { log_error "Private SecretPad did not become healthy."; exit 1; }
@@ -1027,9 +1336,19 @@ case "$COMMAND" in
     if verify_managed_container "$MINIO_CONTAINER"; then
       docker stop "$MINIO_CONTAINER" >/dev/null
     fi
+    if verify_managed_container "$CIPHERGPU_CONTAINER"; then
+      docker stop "$CIPHERGPU_CONTAINER" >/dev/null
+    fi
+    if verify_managed_container "$SIM_ATTESTATION_CONTAINER"; then
+      docker stop "$SIM_ATTESTATION_CONTAINER" >/dev/null
+    fi
     if verify_managed_container "$KUSCIA_CONTAINER"; then
       docker stop "$KUSCIA_CONTAINER" >/dev/null
     fi
     log_success "Private developer system stopped. Runtime data was retained at ${DEV_ROOT}."
+    ;;
+  manifest)
+    [ -f "$MANIFEST_FILE" ] || { log_error "Build manifest does not exist: ${MANIFEST_FILE}"; exit 1; }
+    cat "$MANIFEST_FILE"
     ;;
 esac
