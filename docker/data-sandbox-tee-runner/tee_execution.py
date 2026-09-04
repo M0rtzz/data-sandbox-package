@@ -25,6 +25,7 @@ REPORT_OPERATORS = {
     "report.feature_importance": "FEATURE_IMPORTANCE",
     "report.tree_structure": "TREE_STRUCTURE",
 }
+MODEL_PREDICT_OPERATOR = "model.predict"
 
 
 @dataclass
@@ -32,6 +33,7 @@ class Output:
     kind: str
     content: bytes | dict | list
     report_kind: str | None = None
+    artifact_type: str | None = None
 
 
 def execute(task, inputs, program_bytes, workdir):
@@ -67,6 +69,8 @@ def execute(task, inputs, program_bytes, workdir):
         if requested and requested != task["operatorId"]:
             raise ContractError("CONTRACT_INVALID", "operator parameter does not match signed task")
         parameters["op"] = task["operatorId"]
+        if task["operatorId"] == MODEL_PREDICT_OPERATOR:
+            return [_execute_model_predict(inputs, parameters)]
         command = [sys.executable, str(builtin)]
     elif kind == "PYTHON":
         path = root / "program.py"
@@ -187,12 +191,16 @@ def _classify(task, raw):
         stripped = line.decode("utf-8", errors="strict").rstrip("\r\n")
         if stripped.startswith(MODEL_MARKER + ","):
             try:
-                model_outputs.append(base64.b64decode(stripped.split(",", 1)[1], validate=True))
+                model_outputs.append(Output("MODEL",
+                                            base64.b64decode(stripped.split(",", 1)[1], validate=True),
+                                            artifact_type="MODEL"))
             except Exception as exc:
                 raise ContractError("DATA_INTEGRITY_FAILED", "invalid model marker") from exc
         elif stripped.startswith(PREPROC_MARKER + ","):
             try:
-                model_outputs.append(base64.b64decode(stripped.split(",", 1)[1], validate=True))
+                model_outputs.append(Output("MODEL",
+                                            base64.b64decode(stripped.split(",", 1)[1], validate=True),
+                                            artifact_type="PREPROCESSOR"))
             except Exception as exc:
                 raise ContractError("DATA_INTEGRITY_FAILED", "invalid preprocessing marker") from exc
         else:
@@ -206,7 +214,7 @@ def _classify(task, raw):
         report = _structured_report(clean, REPORT_OPERATORS[operator])
         return [Output("REPORT", report, REPORT_OPERATORS[operator])]
     outputs = [Output("DATA", clean)] if clean.strip() else []
-    outputs.extend(Output("MODEL", content) for content in model_outputs)
+    outputs.extend(model_outputs)
     if not outputs:
         raise ContractError("CONTRACT_INVALID", "program produced no classified output")
     return outputs
@@ -255,3 +263,55 @@ def _structured_report(content, report_kind):
         if parsed.get("format") not in {"json-tree-v1", "text-tree-v1"}:
             raise ContractError("CONTRACT_INVALID", "tree report format is not whitelisted")
     return parsed
+
+
+def _execute_model_predict(inputs, parameters):
+    """Load an encrypted joblib model and score API rows inside the trusted runtime."""
+    if len(inputs) != 2:
+        raise ContractError("CONTRACT_INVALID", "model prediction requires DATA and MODEL inputs")
+    if parameters.get("inputKinds") != ["DATA", "MODEL"]:
+        raise ContractError("CONTRACT_INVALID", "model prediction input kinds are invalid")
+    features = parameters.get("features")
+    if not isinstance(features, list) or not features or len(set(features)) != len(features) \
+            or any(not isinstance(value, str) or not value for value in features):
+        raise ContractError("CONTRACT_INVALID", "model features are invalid")
+    max_rows = parameters.get("maxRows", 1000)
+    if not isinstance(max_rows, int) or isinstance(max_rows, bool) or max_rows <= 0 or max_rows > 1000:
+        raise ContractError("CONTRACT_INVALID", "model prediction row limit is invalid")
+    try:
+        import io
+        import joblib
+        import pandas as pd
+        frame = pd.read_csv(io.BytesIO(bytes(inputs[0])), encoding="utf-8")
+        if frame.empty or len(frame) > max_rows:
+            raise ContractError("PAYLOAD_TOO_LARGE", "model prediction rows exceed signed limit")
+        if any(name not in frame.columns for name in features):
+            raise ContractError("POLICY_DENIED", "model feature is unavailable")
+        model = joblib.load(io.BytesIO(bytes(inputs[1])))
+        selected = frame[features]
+        predicted = model.predict(selected)
+        header = ["cluster" if str(parameters.get("modelKind") or "") == "kmeans" else "pred"]
+        rows = [[_json_scalar(value)] for value in predicted]
+        if str(parameters.get("task") or "") == "classification" and hasattr(model, "predict_proba"):
+            probabilities = model.predict_proba(selected)
+            if getattr(probabilities, "ndim", 0) == 2 and probabilities.shape[1] == 2:
+                header.append("pred_prob")
+                for index, value in enumerate(probabilities[:, 1]):
+                    rows[index].append(_json_scalar(value))
+        report = {"header": header, "rows": rows, "resultRows": len(rows)}
+        encoded = json.dumps(report, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        if len(encoded) > MAX_REPORT_BYTES:
+            raise ContractError("PAYLOAD_TOO_LARGE", "model prediction report exceeds 1 MiB")
+        return Output("REPORT", report, "MODEL_API_PREDICTION")
+    except ContractError:
+        raise
+    except Exception as exc:
+        raise ContractError("CONTRACT_INVALID", "trusted model prediction failed") from exc
+
+
+def _json_scalar(value):
+    if hasattr(value, "item"):
+        value = value.item()
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)

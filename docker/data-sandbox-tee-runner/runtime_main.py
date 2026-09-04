@@ -46,8 +46,16 @@ def main():
     envelopes = {(item.get("keyId"), version(item.get("keyVersion"), "keyVersion")): item
                  for item in release.get("keyEnvelopes", []) if isinstance(item, dict)}
     plaintext_inputs = []
+    parameters = (task.get("program") or {}).get("parameters", {})
+    declared_kinds = parameters.get("inputKinds")
+    if task.get("operatorId") != "model.predict" and declared_kinds is not None:
+        reject("CONTRACT_INVALID", "typed inputs are reserved for model prediction")
+    input_kinds = list(declared_kinds or ["DATA"] * len(task["inputs"]))
+    if len(input_kinds) != len(task["inputs"]) or any(
+            kind not in ("DATA", "MODEL") for kind in input_kinds):
+        reject("CONTRACT_INVALID", "signed inputKinds do not match task inputs")
     try:
-        for item in task["inputs"]:
+        for index, item in enumerate(task["inputs"]):
             envelope = envelopes.get((item["keyId"], item["keyVersion"]))
             if not envelope:
                 reject("KEY_SERVICE_UNAVAILABLE", "input key was not released")
@@ -57,7 +65,10 @@ def main():
                 plaintext = decrypt_input(encrypted, item, bytes(key))
                 if len(plaintext) != item["plaintextBytes"]:
                     reject("DATA_INTEGRITY_FAILED", "plaintext size does not match signed task")
-                plaintext_inputs.append(bytearray(filter_columns(plaintext, task["columns"])))
+                if input_kinds[index] == "MODEL":
+                    plaintext_inputs.append(bytearray(plaintext))
+                else:
+                    plaintext_inputs.append(bytearray(filter_columns(plaintext, task["columns"])))
                 del plaintext
             finally:
                 wipe(key)
@@ -108,7 +119,9 @@ def main():
                                     "keyVersion": version(encrypted["keyVersion"], "keyVersion"),
                                     "ciphertextSha256": encrypted["ciphertextSha256"],
                                     "contributors": contributors,
-                                    "exportState": stored.get("exportState", "PENDING_APPROVAL")})
+                                    "exportState": stored.get("exportState", "PENDING_APPROVAL"),
+                                    **({"artifactType": output.artifact_type}
+                                       if output.artifact_type else {})})
         submit_receipt(api, task, private_pem, workload_kid, started, runtime_mode,
                        attestation, "SUCCEEDED", receipt_outputs, None)
         print(json.dumps({"status": "SUCCEEDED", "taskId": task["taskId"],
