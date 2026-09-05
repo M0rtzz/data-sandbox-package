@@ -1320,6 +1320,10 @@ case "$COMMAND" in
     write_manifest
     log_success "Private developer system is ready at http://127.0.0.1:${CONSOLE_PORT}/edge?tab=sandbox-manager"
     log "A100 simulation console: http://127.0.0.1:${CONSOLE_PORT}/confidential-compute"
+    public_console_host="$(resolve_advertise_host)"
+    log "HTTPS asset management: https://${public_console_host}:${CONSOLE_HTTPS_PORT}/confidential-compute"
+    log "HTTPS confidential training: https://${public_console_host}:${CONSOLE_HTTPS_PORT}/confidential-training"
+    log "HTTPS uses the local self-signed certificate; accept it in the browser before using WebCrypto."
     if [ -n "$VLLM_URL" ]; then
       log "Local-weight inference runtime: ${VLLM_URL}"
     else
