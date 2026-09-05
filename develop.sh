@@ -777,9 +777,10 @@ generate_confidential_leaf_certificate() {
       && cmp -s "${CONFIDENTIAL_CA_DIR}/ca.crt" "${destination}/ca.crt" \
       && openssl x509 -checkend 86400 -noout -in "$cert_file" >/dev/null 2>&1 \
       && openssl verify -CAfile "${CONFIDENTIAL_CA_DIR}/ca.crt" "$cert_file" >/dev/null 2>&1; then
-    chmod 444 "$key_file" "$cert_file" "${destination}/ca.crt"
-    return
+      chmod 444 "$key_file" "$cert_file" "${destination}/ca.crt"
+      return
   fi
+  chmod u+w "$key_file" "$cert_file" "${destination}/ca.crt" 2>/dev/null || true
   openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out "$key_file"
   openssl req -new -key "$key_file" -out "$request_file" -subj "/CN=${common_name}"
   {
@@ -801,15 +802,32 @@ generate_confidential_leaf_certificate() {
 ensure_confidential_credentials() {
   umask 077
   if [ ! -s "${CONFIDENTIAL_CA_DIR}/ca.key" ] || [ ! -s "${CONFIDENTIAL_CA_DIR}/ca.crt" ] \
-      || ! openssl x509 -checkend 86400 -noout -in "${CONFIDENTIAL_CA_DIR}/ca.crt" >/dev/null 2>&1; then
+      || ! openssl x509 -checkend 86400 -noout -in "${CONFIDENTIAL_CA_DIR}/ca.crt" >/dev/null 2>&1 \
+      || ! openssl verify -CAfile "${CONFIDENTIAL_CA_DIR}/ca.crt" \
+        "${CONFIDENTIAL_CA_DIR}/ca.crt" >/dev/null 2>&1; then
+    local ca_config="${CONFIDENTIAL_CA_DIR}/ca.cnf"
     log "Generating an isolated A100 simulation mTLS root"
+    chmod u+w "${CONFIDENTIAL_CA_DIR}/ca.key" "${CONFIDENTIAL_CA_DIR}/ca.crt" \
+      2>/dev/null || true
     openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 \
       -out "${CONFIDENTIAL_CA_DIR}/ca.key"
+    {
+      printf '[req]\n'
+      printf 'distinguished_name=dn\n'
+      printf 'x509_extensions=v3_ca\n'
+      printf 'prompt=no\n'
+      printf '[dn]\n'
+      printf 'CN=%s-a100-sim-test-root\n' "$DEV_PREFIX"
+      printf '[v3_ca]\n'
+      printf 'subjectKeyIdentifier=hash\n'
+      printf 'authorityKeyIdentifier=keyid:always\n'
+      printf 'basicConstraints=critical,CA:TRUE\n'
+      printf 'keyUsage=critical,keyCertSign,cRLSign\n'
+    } >"$ca_config"
     openssl req -x509 -new -key "${CONFIDENTIAL_CA_DIR}/ca.key" -days 30 -sha256 \
-      -subj "/CN=${DEV_PREFIX}-a100-sim-test-root" \
-      -addext 'basicConstraints=critical,CA:TRUE' \
-      -addext 'keyUsage=critical,keyCertSign,cRLSign' \
+      -config "$ca_config" \
       -out "${CONFIDENTIAL_CA_DIR}/ca.crt"
+    rm -f "$ca_config"
     chmod 400 "${CONFIDENTIAL_CA_DIR}/ca.key"
     chmod 444 "${CONFIDENTIAL_CA_DIR}/ca.crt"
   fi

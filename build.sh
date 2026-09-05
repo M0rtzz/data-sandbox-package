@@ -36,7 +36,11 @@ log "Building local SecretPad frontend"
   cd "$FRONTEND_DIR"
   # Build workspace packages such as @secretflow/dag and @secretflow/utils
   # before Umi resolves their package entrypoints during the platform build.
-  pnpm run setup
+  # Nx 15 may make run-many fail without surfacing the child tsup error in this
+  # workspace. Build the two library entrypoints explicitly and let the Umi
+  # production build prepare the platform app itself.
+  pnpm --filter @secretflow/utils run setup
+  pnpm --filter @secretflow/dag run setup
   pnpm --filter secretpad build
 )
 
