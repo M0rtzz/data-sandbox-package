@@ -31,6 +31,7 @@ fi
 
 DEV_NAME="${DATA_SANDBOX_DEV_NAME:-$(id -un)}"
 CONSOLE_PORT="${DATA_SANDBOX_DEV_PORT:-39088}"
+CONSOLE_HTTPS_PORT="${DATA_SANDBOX_DEV_HTTPS_PORT:-$((CONSOLE_PORT + 1))}"
 GATEWAY_PORT="${DATA_SANDBOX_DEV_GATEWAY_PORT:-39080}"
 API_HTTP_PORT="${DATA_SANDBOX_DEV_API_HTTP_PORT:-39082}"
 API_GRPC_PORT="${DATA_SANDBOX_DEV_API_GRPC_PORT:-39083}"
@@ -39,6 +40,7 @@ METRICS_PORT="${DATA_SANDBOX_DEV_METRICS_PORT:-39084}"
 ADMIN_USER="${DATA_SANDBOX_DEV_ADMIN_USER:-devadmin}"
 ADVERTISE_HOST="${DATA_SANDBOX_DEV_ADVERTISE_HOST:-}"
 EXPECTED_BRANCH="${DATA_SANDBOX_DEV_BRANCH:-}"
+CIPHERGPU_EXPECTED_BRANCH="${DATA_SANDBOX_CIPHERGPU_BRANCH:-}"
 SKIP_BUILD=false
 REQUIRE_PUSHED=false
 LOG_COMPONENT=secretpad
@@ -61,6 +63,7 @@ Usage:
 Options:
   --name NAME            Developer identifier. Default: current system user.
   --port PORT            SecretPad console port. Default: 39088.
+  --https-port PORT      HTTPS console port. Default: console port + 1.
   --gateway-port PORT    Kuscia gateway port. Default: 39080.
   --api-http-port PORT   Kuscia HTTP API port. Default: 39082.
   --api-grpc-port PORT   Kuscia gRPC API port. Default: 39083.
@@ -84,6 +87,7 @@ Environment overrides:
   DATA_SANDBOX_BACKEND_DIR       confidential-ai backend checkout.
   DATA_SANDBOX_FRONTEND_DIR      confidential-ai-frontend checkout.
   DATA_SANDBOX_CIPHERGPU_DIR     CipherGPU checkout (shared branch is supported).
+  DATA_SANDBOX_CIPHERGPU_BRANCH  Expected CipherGPU branch. Default: its current branch.
   DATA_SANDBOX_DEV_VLLM_URL      Optional private vLLM OpenAI endpoint for local weights.
 
 The default `up` builds the current working tree, so developers can test before
@@ -97,6 +101,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --name) DEV_NAME="${2:?Missing value for --name}"; shift 2 ;;
     --port) CONSOLE_PORT="${2:?Missing value for --port}"; shift 2 ;;
+    --https-port) CONSOLE_HTTPS_PORT="${2:?Missing value for --https-port}"; shift 2 ;;
     --gateway-port) GATEWAY_PORT="${2:?Missing value for --gateway-port}"; shift 2 ;;
     --api-http-port) API_HTTP_PORT="${2:?Missing value for --api-http-port}"; shift 2 ;;
     --api-grpc-port) API_GRPC_PORT="${2:?Missing value for --api-grpc-port}"; shift 2 ;;
@@ -132,7 +137,7 @@ esac
   exit 1
 }
 
-for port in "$CONSOLE_PORT" "$GATEWAY_PORT" "$API_HTTP_PORT" "$API_GRPC_PORT" "$INTERNAL_PORT" "$METRICS_PORT"; do
+for port in "$CONSOLE_PORT" "$CONSOLE_HTTPS_PORT" "$GATEWAY_PORT" "$API_HTTP_PORT" "$API_GRPC_PORT" "$INTERNAL_PORT" "$METRICS_PORT"; do
   if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1024 ] || [ "$port" -gt 65535 ]; then
     log_error "Invalid unprivileged TCP port: ${port}"
     exit 1
@@ -225,14 +230,15 @@ require_personal_checkout() {
 
 verify_checkout() {
   local repository=$1
+  local expected=${2:-$EXPECTED_BRANCH}
   local branch
   git_repo "$repository" rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
     log_error "Not a Git repository: ${repository}"
     exit 1
   }
   branch="$(git_repo "$repository" branch --show-current)"
-  [ "$branch" = "$EXPECTED_BRANCH" ] || {
-    log_error "${repository} is on ${branch:-detached HEAD}; expected ${EXPECTED_BRANCH}."
+  [ "$branch" = "$expected" ] || {
+    log_error "${repository} is on ${branch:-detached HEAD}; expected ${expected}."
     exit 1
   }
   if [ "$REQUIRE_PUSHED" = false ]; then
@@ -244,7 +250,7 @@ verify_checkout() {
   }
   local upstream counts
   upstream="$(git_repo "$repository" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)" || {
-    log_error "${repository} has no upstream branch. Push ${EXPECTED_BRANCH} first."
+    log_error "${repository} has no upstream branch. Push ${expected} first."
     exit 1
   }
   git_repo "$repository" fetch --quiet || {
@@ -432,7 +438,10 @@ build_developer_image() {
   local backend_status_after frontend_status_after ciphergpu_status_after
   verify_checkout "$BACKEND_DIR"
   verify_checkout "$FRONTEND_DIR"
-  verify_checkout "$CIPHERGPU_DIR"
+  if [ -z "$CIPHERGPU_EXPECTED_BRANCH" ]; then
+    CIPHERGPU_EXPECTED_BRANCH="$(git_repo "$CIPHERGPU_DIR" branch --show-current)"
+  fi
+  verify_checkout "$CIPHERGPU_DIR" "$CIPHERGPU_EXPECTED_BRANCH"
   if [ "$SKIP_BUILD" = true ]; then
     verify_managed_image "$SECRETPAD_IMAGE" || {
       log_error "Developer image not found: ${SECRETPAD_IMAGE}. Run up without --skip-build."
@@ -1167,6 +1176,7 @@ register_secretpad_service() {
 
 start_secretpad() {
   require_port_available "$CONSOLE_PORT" "$SECRETPAD_CONTAINER"
+  require_port_available "$CONSOLE_HTTPS_PORT" "$SECRETPAD_CONTAINER"
   if verify_managed_container "$SECRETPAD_CONTAINER"; then
     docker rm -f "$SECRETPAD_CONTAINER" >/dev/null
   fi
@@ -1178,6 +1188,7 @@ start_secretpad() {
     --label "${owner_label}=$(id -un)" \
     --label "${workspace_label}=${WORKSPACE_DIR}" \
     -p "${CONSOLE_PORT}:8080" \
+    -p "${CONSOLE_HTTPS_PORT}:443" \
     --env-file "$CREDENTIAL_FILE" \
     -v "${SECRETPAD_CONFIG_DIR}:/app/config" \
     -v "${SECRETPAD_DB_DIR}:/app/db" \
@@ -1252,6 +1263,7 @@ write_manifest() {
       printf 'source_mode=working-tree\n'
     fi
     printf 'console_port=%s\n' "$CONSOLE_PORT"
+    printf 'console_https_port=%s\n' "$CONSOLE_HTTPS_PORT"
     printf 'kuscia_gateway_port=%s\n' "$GATEWAY_PORT"
     printf 'advertise_host=%s\n' "$(resolve_advertise_host)"
   } >"$MANIFEST_FILE"
@@ -1262,7 +1274,9 @@ show_status() {
   printf 'Workspace: %s\n' "$WORKSPACE_DIR"
   printf 'Runtime:   %s\n' "$DEV_ROOT"
   printf 'Console:   http://127.0.0.1:%s/edge?tab=sandbox-manager\n' "$CONSOLE_PORT"
+  printf 'Console TLS: https://127.0.0.1:%s/edge?tab=sandbox-manager\n' "$CONSOLE_HTTPS_PORT"
   printf 'A100 UI:   http://127.0.0.1:%s/confidential-compute\n' "$CONSOLE_PORT"
+  printf 'A100 TLS:  https://127.0.0.1:%s/confidential-compute\n' "$CONSOLE_HTTPS_PORT"
   printf 'Security:  a100-sim (simulated=true, attestationVerified=false)\n'
   printf '\nContainers:\n'
   for container in "$KUSCIA_CONTAINER" "$MINIO_CONTAINER" "$SIM_ATTESTATION_CONTAINER" \
