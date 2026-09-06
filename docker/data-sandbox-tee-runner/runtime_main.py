@@ -48,7 +48,7 @@ def main():
     plaintext_inputs = []
     parameters = (task.get("program") or {}).get("parameters", {})
     declared_kinds = parameters.get("inputKinds")
-    if task.get("operatorId") not in ("model.predict", "report.tree_structure") and declared_kinds is not None:
+    if task.get("operatorId") not in ("model.predict", "report.tree_structure", "report.model_evaluation") and declared_kinds is not None:
         reject("CONTRACT_INVALID", "typed inputs are reserved for model prediction")
     input_kinds = list(declared_kinds or ["DATA"] * len(task["inputs"]))
     if len(input_kinds) != len(task["inputs"]) or any(

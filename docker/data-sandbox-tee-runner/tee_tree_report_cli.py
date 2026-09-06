@@ -8,7 +8,12 @@ from tee_contract_runtime import ContractError
 
 if __name__ == '__main__':
     try:
-        result = parse_tree(Path(sys.argv[1]).read_bytes(), json.loads(sys.argv[3]))
+        parameters = json.loads(sys.argv[3])
+        if parameters.get('op') == 'report.model_evaluation':
+            from tee_evaluation_report import evaluate
+            result = evaluate(Path(sys.argv[1]).read_bytes(), parameters)
+        else:
+            result = parse_tree(Path(sys.argv[1]).read_bytes(), parameters)
     except ContractError as error:
         result = {'errorCode': error.error_code}
     except Exception:

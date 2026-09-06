@@ -69,7 +69,7 @@ def execute(task, inputs, program_bytes, workdir):
         if requested and requested != task["operatorId"]:
             raise ContractError("CONTRACT_INVALID", "operator parameter does not match signed task")
         parameters["op"] = task["operatorId"]
-        if task.get("contractVersion") == "tee-contract/2.0" and task["operatorId"] == "report.tree_structure":
+        if task.get("contractVersion") == "tee-contract/2.0" and task["operatorId"] in ("report.tree_structure", "report.model_evaluation"):
             return [_execute_tree_report(task, input_paths, root, exec_uid, exec_gid)]
         if task["operatorId"] == MODEL_PREDICT_OPERATOR:
             return [_execute_model_predict(inputs, parameters)]
@@ -270,7 +270,8 @@ def _structured_report(content, report_kind):
 def _execute_tree_report(task, input_paths, root, exec_uid, exec_gid):
     # 反序列化只在无身份凭据的非 root 子进程内进行，父进程只接收白名单 JSON。
     parameters = task["program"]["parameters"]
-    if len(input_paths) != 1 or parameters.get("inputKinds") != ["MODEL"]:
+    evaluation = task["operatorId"] == "report.model_evaluation"
+    if len(input_paths) != 1 or parameters.get("inputKinds") != (["DATA"] if evaluation else ["MODEL"]):
         raise ContractError("CONTRACT_INVALID", "tree report requires one MODEL input")
     output_path = root / "tree-report.json"
     command = [sys.executable, str(Path(__file__).with_name("tee_tree_report_cli.py")),
@@ -287,6 +288,10 @@ def _execute_tree_report(task, input_paths, root, exec_uid, exec_gid):
         code = parsed["errorCode"]
         raise ContractError(code if code in {"CONTRACT_INVALID", "PAYLOAD_TOO_LARGE", "POLICY_DENIED"}
                             else "CONTRACT_INVALID", "trusted tree report failed")
+    if evaluation:
+        from tee_evaluation_report import validate_evaluation
+        validate_evaluation(parsed)
+        return Output("REPORT", parsed, "EVALUATION_METRICS")
     from tee_tree_report_validation import validate_report
     validate_report(parsed, task["columns"])
     return Output("REPORT", parsed, "TREE_STRUCTURE")

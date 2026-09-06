@@ -32,6 +32,7 @@ COPY data-sandbox-tee-runner/runtime_main.py \
      data-sandbox-tee-runner/tee_execution.py \
      data-sandbox-tee-runner/tee_contract_runtime.py \
      data-sandbox-tee-runner/tee_api_client.py \
+     data-sandbox-tee-runner/tee_evaluation_report.py \
      data-sandbox-tee-runner/tee_tree_report.py \
      data-sandbox-tee-runner/tee_tree_report_cli.py \
      data-sandbox-tee-runner/tee_tree_report_validation.py /app/
