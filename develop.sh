@@ -18,7 +18,9 @@ load_env "${PACKAGE_DIR}"
 
 BACKEND_DIR="$(realpath -m "${DATA_SANDBOX_BACKEND_DIR:-${WORKSPACE_DIR}/confidential-ai}")"
 FRONTEND_DIR="$(realpath -m "${DATA_SANDBOX_FRONTEND_DIR:-${WORKSPACE_DIR}/confidential-ai-frontend}")"
-CIPHERGPU_DIR="$(realpath -m "${DATA_SANDBOX_CIPHERGPU_DIR:-${WORKSPACE_DIR}/../gpu/ciphergpu}")"
+# Prefer the project-owned runtime implementation; an external checkout remains
+# an explicit override for legacy developer stacks.
+CIPHERGPU_DIR="$(realpath -m "${DATA_SANDBOX_CIPHERGPU_DIR:-${WORKSPACE_DIR}/ciphergpu-runtime}")"
 VLLM_URL="${DATA_SANDBOX_DEV_VLLM_URL:-}"
 
 case "${1:-help}" in
@@ -180,6 +182,7 @@ CIPHERGPU_SERVER_CERT_DIR="${CONFIDENTIAL_ROOT}/ciphergpu-server"
 SIM_ATTESTATION_SERVER_CERT_DIR="${CONFIDENTIAL_ROOT}/sim-attestation-server"
 SECRETPAD_CIPHERGPU_CLIENT_DIR="${CONFIDENTIAL_ROOT}/secretpad-client"
 CIPHERGPU_SIM_CLIENT_DIR="${CONFIDENTIAL_ROOT}/ciphergpu-client"
+CIPHERGPU_MODEL_RUNTIME_DIR="${CONFIDENTIAL_ROOT}/model-runtime"
 SIM_ATTESTATION_SECRET_DIR="${CONFIDENTIAL_ROOT}/sim-attestation-secret"
 SNAPSHOT_DIR="${DEV_ROOT}/snapshots"
 BACKUP_DIR="${DEV_ROOT}/backups"
@@ -862,7 +865,7 @@ ensure_confidential_credentials() {
   if [ ! -s "$public_key_file" ]; then
     docker run --rm \
       -v "${SIM_ATTESTATION_SECRET_DIR}:/run/secrets:ro" \
-      --entrypoint python "$CIPHERGPU_IMAGE" -c \
+      --entrypoint /usr/bin/python3 "$CIPHERGPU_IMAGE" -c \
       'from ciphergpu.crypto import EvidenceSigner; print(EvidenceSigner.load("/run/secrets/sak.key").public_key)' \
       >"$public_key_file"
     chmod 444 "$public_key_file"
@@ -887,7 +890,7 @@ wait_for_confidential_service() {
   docker run --rm --network "$DEV_NETWORK" \
     -e "HEALTH_URL=${url}/v1/health" \
     -v "${client_cert_dir}:/run/client:ro" \
-    --entrypoint python "$CIPHERGPU_IMAGE" -c '
+    --entrypoint /usr/bin/python3 "$CIPHERGPU_IMAGE" -c '
 import os
 import ssl
 import time
@@ -928,7 +931,7 @@ start_sim_attestation() {
     -e SIM_ATTESTATION_SIGNING_KEY=/run/secrets/sak.key \
     -v "${SIM_ATTESTATION_SECRET_DIR}:/run/secrets:ro" \
     -v "${SIM_ATTESTATION_SERVER_CERT_DIR}:/run/tls:ro" \
-    --entrypoint python "$CIPHERGPU_IMAGE" -m uvicorn ciphergpu.sim_attestation:app \
+    --entrypoint /usr/bin/python3 "$CIPHERGPU_IMAGE" -m uvicorn ciphergpu.sim_attestation:app \
       --host 0.0.0.0 --port 9100 --no-access-log \
       --ssl-keyfile /run/tls/server.key --ssl-certfile /run/tls/server.crt \
       --ssl-ca-certs /run/tls/ca.crt --ssl-cert-reqs 2 >/dev/null
@@ -945,6 +948,14 @@ start_ciphergpu() {
   fi
   local gpu_args=()
   local model_runtime_args=()
+  mkdir -p "$CIPHERGPU_MODEL_RUNTIME_DIR"
+  # The agent itself remains the non-root image user.  Initialize only the
+  # dedicated bind mount once through Docker so that a host UID is never
+  # injected into the container (PyTorch also requires a resolvable passwd UID).
+  docker run --rm --user 0:0 -v "${CIPHERGPU_MODEL_RUNTIME_DIR}:/runtime:rw" \
+    --entrypoint /bin/chown "$CIPHERGPU_IMAGE" -R 10001:10001 /runtime
+  docker run --rm --user 0:0 -v "${CIPHERGPU_MODEL_RUNTIME_DIR}:/runtime:rw" \
+    --entrypoint /bin/chmod "$CIPHERGPU_IMAGE" 700 /runtime
   if [ "${DATA_SANDBOX_DEV_CIPHERGPU_GPUS:-all}" != none ]; then
     gpu_args+=(--gpus "${DATA_SANDBOX_DEV_CIPHERGPU_GPUS:-all}")
   fi
@@ -971,9 +982,16 @@ start_ciphergpu() {
     -e SIM_ATTESTATION_CA=/run/sim-client/ca.crt \
     -e SIM_ATTESTATION_CLIENT_CERT=/run/sim-client/client.crt \
     -e SIM_ATTESTATION_CLIENT_KEY=/run/sim-client/client.key \
+    -e CIPHERGPU_MODEL_RUNTIME_DIR=/var/lib/ciphergpu/models \
+    -e HOME=/var/lib/ciphergpu/models/.home \
+    -e XDG_CACHE_HOME=/var/lib/ciphergpu/models/.cache \
+    -e "CIPHERGPU_VLLM_GPU_MEMORY_UTILIZATION=${DATA_SANDBOX_DEV_VLLM_GPU_MEMORY_UTILIZATION:-0.10}" \
+    -e "CIPHERGPU_VLLM_MAX_MODEL_LEN=${DATA_SANDBOX_DEV_VLLM_MAX_MODEL_LEN:-1024}" \
+    -e "CUDA_VISIBLE_DEVICES=${DATA_SANDBOX_DEV_CIPHERGPU_VISIBLE_DEVICES:-1}" \
     "${model_runtime_args[@]}" \
     -v "${CIPHERGPU_SERVER_CERT_DIR}:/run/tls:ro" \
     -v "${CIPHERGPU_SIM_CLIENT_DIR}:/run/sim-client:ro" \
+    -v "${CIPHERGPU_MODEL_RUNTIME_DIR}:/var/lib/ciphergpu/models:rw" \
     "$CIPHERGPU_IMAGE" >/dev/null
   wait_for_confidential_service "https://${CIPHERGPU_CONTAINER}:9000" \
     "$SECRETPAD_CIPHERGPU_CLIENT_DIR" || {
@@ -987,7 +1005,7 @@ verify_ciphergpu_capabilities() {
   docker run --rm --network "$DEV_NETWORK" \
     -e "CAPABILITIES_URL=https://${CIPHERGPU_CONTAINER}:9000/v1/crypto/capabilities" \
     -v "${SECRETPAD_CIPHERGPU_CLIENT_DIR}:/run/client:ro" \
-    --entrypoint python "$CIPHERGPU_IMAGE" -c '
+    --entrypoint /usr/bin/python3 "$CIPHERGPU_IMAGE" -c '
 import os
 import ssl
 import httpx
@@ -1323,6 +1341,7 @@ case "$COMMAND" in
     public_console_host="$(resolve_advertise_host)"
     log "HTTPS asset management: https://${public_console_host}:${CONSOLE_HTTPS_PORT}/confidential-compute"
     log "HTTPS confidential training: https://${public_console_host}:${CONSOLE_HTTPS_PORT}/confidential-training"
+    log "HTTPS confidential LLM management: https://${public_console_host}:${CONSOLE_HTTPS_PORT}/llm-confidential-management"
     log "HTTPS uses the local self-signed certificate; accept it in the browser before using WebCrypto."
     if [ -n "$VLLM_URL" ]; then
       log "Local-weight inference runtime: ${VLLM_URL}"
