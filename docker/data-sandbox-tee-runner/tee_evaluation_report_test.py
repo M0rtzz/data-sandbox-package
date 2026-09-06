@@ -29,3 +29,14 @@ class EvaluationReportTest(unittest.TestCase):
                        {'metrics': {'n': 1, 'secret': 2}}):
             with self.assertRaises(ContractError):
                 validate_evaluation(report)
+
+    def test_evaluation_keeps_prediction_columns_but_regular_tasks_remain_filtered(self):
+        from runtime_main import report_input
+        raw = b'age,label,pred,pred_prob\n20,1,1,0.9\n'
+        task = {'contractVersion': 'tee-contract/2.0', 'operatorId': 'report.model_evaluation',
+                'columns': ['age']}
+        self.assertEqual(raw, report_input(task, 'DATA', raw))
+        task['contractVersion'] = 'tee-contract/1.0'
+        regular = report_input(task, 'DATA', raw)
+        self.assertNotIn(b'pred', regular)
+        self.assertNotIn(b'label', regular)

@@ -22,6 +22,14 @@ from tee_contract_runtime import (CONTRACT_VERSION, ContractError, decrypt_input
 from tee_execution import execute
 
 
+def report_input(task, kind, plaintext):
+    # 固定评估算子需要训练输出中的标签和预测列；这些派生列不属于原始入模特征列。
+    if kind == "MODEL" or (task.get("contractVersion") == "tee-contract/2.0"
+                           and task.get("operatorId") == "report.model_evaluation"):
+        return plaintext
+    return filter_columns(plaintext, task["columns"])
+
+
 def main():
     started = now()
     compact = read_task_jws()
@@ -65,10 +73,7 @@ def main():
                 plaintext = decrypt_input(encrypted, item, bytes(key))
                 if len(plaintext) != item["plaintextBytes"]:
                     reject("DATA_INTEGRITY_FAILED", "plaintext size does not match signed task")
-                if input_kinds[index] == "MODEL":
-                    plaintext_inputs.append(bytearray(plaintext))
-                else:
-                    plaintext_inputs.append(bytearray(filter_columns(plaintext, task["columns"])))
+                plaintext_inputs.append(bytearray(report_input(task, input_kinds[index], plaintext)))
                 del plaintext
             finally:
                 wipe(key)
