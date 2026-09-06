@@ -48,7 +48,7 @@ def main():
     plaintext_inputs = []
     parameters = (task.get("program") or {}).get("parameters", {})
     declared_kinds = parameters.get("inputKinds")
-    if task.get("operatorId") != "model.predict" and declared_kinds is not None:
+    if task.get("operatorId") not in ("model.predict", "report.tree_structure") and declared_kinds is not None:
         reject("CONTRACT_INVALID", "typed inputs are reserved for model prediction")
     input_kinds = list(declared_kinds or ["DATA"] * len(task["inputs"]))
     if len(input_kinds) != len(task["inputs"]) or any(
@@ -122,6 +122,8 @@ def main():
                                     "exportState": stored.get("exportState", "PENDING_APPROVAL"),
                                     **({"artifactType": output.artifact_type}
                                        if output.artifact_type else {})})
+        if task.get("contractVersion") == "tee-contract/2.0":
+            api.authorize_report(task["taskId"])
         submit_receipt(api, task, private_pem, workload_kid, started, runtime_mode,
                        attestation, "SUCCEEDED", receipt_outputs, None)
         print(json.dumps({"status": "SUCCEEDED", "taskId": task["taskId"],
@@ -156,7 +158,7 @@ def submit_failure_receipt(api, task, private_pem, kid, started, runtime_mode,
 def submit_receipt(api, task, private_pem, kid, started, runtime_mode,
                    attestation, status, outputs, error_code):
     versions = {item["policyVersion"] for item in task["inputs"]}
-    receipt = {"contractVersion": CONTRACT_VERSION, "taskId": task["taskId"],
+    receipt = {"contractVersion": task["contractVersion"], "taskId": task["taskId"],
                "requestId": task["requestId"], "status": status,
                "runtimeMode": runtime_mode, "attestationVerified": attestation,
                "policyVersion": next(iter(versions)) if len(versions) == 1 else None,

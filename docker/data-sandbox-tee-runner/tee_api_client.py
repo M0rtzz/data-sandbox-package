@@ -54,6 +54,9 @@ class TeeApiClient:
             "recipientCertPem": self.recipient_cert_pem,
         })
 
+    def authorize_report(self, task_id):
+        return self._json("GET", "/runtime/tasks/" + _path_id(task_id) + "/report-authorization")
+
     def get_object(self, task_id, object_id):
         return self._json("GET", "/objects/" + _path_id(object_id),
                           headers={"X-TEE-Task-Id": _path_id(task_id)})

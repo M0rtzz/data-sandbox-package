@@ -31,7 +31,10 @@ COPY data-sandbox-python-runner/modeling_ops.py /opt/data-sandbox/modeling_ops.p
 COPY data-sandbox-tee-runner/runtime_main.py \
      data-sandbox-tee-runner/tee_execution.py \
      data-sandbox-tee-runner/tee_contract_runtime.py \
-     data-sandbox-tee-runner/tee_api_client.py /app/
+     data-sandbox-tee-runner/tee_api_client.py \
+     data-sandbox-tee-runner/tee_tree_report.py \
+     data-sandbox-tee-runner/tee_tree_report_cli.py \
+     data-sandbox-tee-runner/tee_tree_report_validation.py /app/
 
 RUN chmod 0555 /opt/data-sandbox/modeling_ops.py /app/runtime_main.py \
     && mkdir -p /app/trust \

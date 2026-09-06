@@ -126,8 +126,20 @@ def verify_task_jws(compact, trusted_public_keys, audience, runtime_image_digest
 
 
 def validate_task_spec(task, audience, runtime_image_digest, now=None):
-    if not isinstance(task, dict) or task.get("contractVersion") != CONTRACT_VERSION:
+    if not isinstance(task, dict):
+        _reject("CONTRACT_INVALID", "task must be an object")
+    model_report = task.get("contractVersion") == "tee-contract/2.0" and task.get("operatorId") == "report.tree_structure"
+    if task.get("contractVersion") != CONTRACT_VERSION and not model_report:
         _reject("CONTRACT_INVALID", "contract version mismatch")
+    if model_report:
+        program = task.get("program") or {}
+        parameters = program.get("parameters") or {}
+        if (program.get("kind") != "BUILTIN" or parameters.get("inputKinds") != ["MODEL"]
+                or len(task.get("inputs", [])) != 1 or parameters.get("features") != task.get("columns")
+                or parameters.get("op") != "report.tree_structure"
+                or parameters.get("parserVersion") != "tree-report/1"
+                or (task.get("outputPolicy") or {}).get("reportKinds") != ["TREE_STRUCTURE"]):
+            _reject("CONTRACT_INVALID", "invalid signed MODEL report binding")
     for name in ("taskId", "requestId", "issuer", "audience", "sandboxId", "operatorId", "nonce"):
         _text(task.get(name), name)
     if task["audience"] != audience or task.get("runtimeImageDigest") != runtime_image_digest:
