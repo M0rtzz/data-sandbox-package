@@ -27,6 +27,9 @@ RUN pip install --no-cache-dir \
     xgboost==3.2.0 \
     lightgbm==4.7.0
 
+RUN pip install --no-cache-dir torch==2.8.0+cpu --index-url https://download.pytorch.org/whl/cpu
+
+COPY data-sandbox-python-runner/deep_learning_models.py /usr/local/lib/python3.11/site-packages/deep_learning_models.py
 COPY data-sandbox-python-runner/modeling_ops.py /opt/data-sandbox/modeling_ops.py
 COPY data-sandbox-tee-runner/runtime_main.py \
      data-sandbox-tee-runner/tee_execution.py \

@@ -530,6 +530,35 @@ def _dnn(df, params):
                         regression=False)
 
 
+def _deep_learning(df, params):
+    from deep_learning_models import TabularNeuralModel
+    features = params.get("features")
+    label = params.get("label")
+    if not isinstance(features, list) or not features or len(set(features)) != len(features):
+        raise ValueError("请选择不重复的数值特征列")
+    if not label or label not in df.columns:
+        raise ValueError("训练算子需要配置有效标签列")
+    if any(c not in df.columns for c in features):
+        raise ValueError("所选特征列不在输入数据中")
+    if label in features or any(c in {"pred", "pred_prob", "prediction", "cluster"} for c in features):
+        raise ValueError("特征列不能包含标签列或已有预测列")
+    # 标识列需由使用者显式排除；不猜测列名，不自动选择全部数值列。
+    if any(pd.to_numeric(df[c], errors="coerce").replace([np.inf, -np.inf], np.nan).notna().sum() == 0
+           for c in features):
+        raise ValueError("所选特征包含无有效数值的列")
+    model = TabularNeuralModel(str(params["op"]).split(".")[-1],
+                              task=params.get("task", "classification"),
+                              epochs=params.get("epochs", 50),
+                              learning_rate=params.get("learning_rate", 0.001))
+    frame = df[features]
+    model.fit(frame, df[label])
+    output = df.copy()
+    output["pred"] = model.predict(frame)
+    if model.task == "classification":
+        output["pred_prob"] = model.predict_proba(frame)[:, 1]
+    return output, base64.b64encode(_joblib_dumps(model)).decode("ascii")
+
+
 def _decision_tree(df, params):
     from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
     md = params.get("max_depth")
@@ -660,6 +689,9 @@ OPS = {
     "ml.knn": _knn,
     "ml.kmeans": _kmeans,
     "ml.dnn": _dnn,
+    "ml.cnn": _deep_learning,
+    "ml.rnn": _deep_learning,
+    "ml.lstm": _deep_learning,
     "ml.decision_tree": _decision_tree,
     "ml.xgboost": _xgboost,
     "ml.lightgbm": _lightgbm,
@@ -668,7 +700,7 @@ OPS = {
 }
 
 TRAIN_OPS = {"ml.linear_regression", "ml.logistic_regression", "ml.knn", "ml.kmeans",
-             "ml.dnn", "ml.decision_tree", "ml.xgboost", "ml.lightgbm"}
+             "ml.dnn", "ml.cnn", "ml.rnn", "ml.lstm", "ml.decision_tree", "ml.xgboost", "ml.lightgbm"}
 
 
 def run(op, input_path, output_path, params, input_table="", jdbc_url=""):
